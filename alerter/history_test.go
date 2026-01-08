@@ -2,14 +2,18 @@ package alerter
 
 import (
 	"encoding/json"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/jimmy-boss/alert_routine_load/model"
+	glog "github.com/jimmy-boss/go-log/glog"
 )
+
+func newTestLogger() glog.HLoggerBase {
+	return glog.GetLogger("test")
+}
 
 func newTestHistory(t *testing.T) (*AlertHistory, string) {
 	t.Helper()
@@ -17,7 +21,7 @@ func newTestHistory(t *testing.T) (*AlertHistory, string) {
 	h := &AlertHistory{
 		dir:    dir,
 		maxAge: 720 * time.Hour,
-		logger: slog.Default(),
+		logger: newTestLogger(),
 	}
 	return h, dir
 }
@@ -132,7 +136,7 @@ func TestSaveAndLoad(t *testing.T) {
 	h1 := &AlertHistory{
 		dir:    dir,
 		maxAge: 720 * time.Hour,
-		logger: slog.Default(),
+		logger: newTestLogger(),
 	}
 	h1.AddRecord("db1:100", "job1", "db1", "")
 	h1.AddRecord("db2:200", "job2", "db2", "")
@@ -143,7 +147,7 @@ func TestSaveAndLoad(t *testing.T) {
 	h2 := &AlertHistory{
 		dir:    dir,
 		maxAge: 720 * time.Hour,
-		logger: slog.Default(),
+		logger: newTestLogger(),
 	}
 	if err := h2.load(); err != nil {
 		t.Fatalf("load: %v", err)
@@ -185,7 +189,7 @@ func TestPurgeExpired(t *testing.T) {
 	h2 := &AlertHistory{
 		dir:    dir,
 		maxAge: 720 * time.Hour, // 30 days
-		logger: slog.Default(),
+		logger: newTestLogger(),
 	}
 	h2.load()
 	h2.purgeExpired()

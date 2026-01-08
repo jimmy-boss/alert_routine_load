@@ -8,7 +8,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -16,6 +15,8 @@ import (
 
 	"github.com/jimmy-boss/alert_routine_load/config"
 	"github.com/jimmy-boss/alert_routine_load/model"
+	glog "github.com/jimmy-boss/go-log/glog"
+	"go.uber.org/zap"
 )
 
 // AlertDecision represents a resolved alert ready for notification.
@@ -36,10 +37,17 @@ func WithHistory(h *AlertHistory) Option {
 	}
 }
 
+// WithLogger injects a logger implementation.
+func WithLogger(logger glog.HLoggerBase) Option {
+	return func(a *Alerter) {
+		a.logger = logger
+	}
+}
+
 // Alerter evaluates jobs against config and produces alert decisions.
 type Alerter struct {
 	cfg     *config.Config
-	logger  *slog.Logger
+	logger  glog.HLoggerBase
 	client  *http.Client
 	history *AlertHistory
 
@@ -47,15 +55,17 @@ type Alerter struct {
 	status map[string]*model.AlertStatus // key = "db:jobId"
 }
 
-func New(cfg *config.Config, logger *slog.Logger, opts ...Option) *Alerter {
+func New(cfg *config.Config, opts ...Option) *Alerter {
 	a := &Alerter{
 		cfg:    cfg,
-		logger: logger,
 		client: &http.Client{Timeout: cfg.Alert.ErrorURLTimeout.Duration},
 		status: make(map[string]*model.AlertStatus),
 	}
 	for _, opt := range opts {
 		opt(a)
+	}
+	if a.logger == nil {
+		a.logger = glog.GlobalLoggers["default"]
 	}
 	return a
 }
@@ -208,7 +218,10 @@ func (a *Alerter) fetchAndDedup(ctx context.Context, rawURLs string) string {
 		}
 		body, err := a.fetchURL(ctx, u)
 		if err != nil {
-			a.logger.Warn("fetch error url failed", "url", u, "err", err)
+			a.logger.Warn("fetch error url failed",
+				zap.String("url", u),
+				zap.Error(err),
+			)
 			continue
 		}
 		normalized := strings.TrimSpace(body)

@@ -9,7 +9,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log/slog"
 	"os"
 	"os/signal"
 	"strings"
@@ -20,6 +19,8 @@ import (
 	"github.com/jimmy-boss/alert_routine_load/config"
 	"github.com/jimmy-boss/alert_routine_load/notifier"
 	"github.com/jimmy-boss/alert_routine_load/scanner"
+	glog "github.com/jimmy-boss/go-log/glog"
+	"go.uber.org/zap"
 
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
@@ -31,23 +32,32 @@ func main() {
 	flag.Parse()
 
 	// Logger.
-	slogger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	log, err := glog.NewZapLogger(glog.LoggerConfig{
+		Level:      "info",
+		OutputPath: []string{"stdout"},
+		Encoder:    "console",
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "init logger: %v\n", err)
+		os.Exit(1)
+	}
+	defer log.Close()
 
 	// Load config.
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
-		slogger.Error("load config failed", "err", err)
+		log.Error("load config failed", zap.Error(err))
 		os.Exit(1)
 	}
-	slogger.Info("config loaded",
-		"databases", len(cfg.Database),
-		"scan_interval", cfg.Alert.ScanInterval,
-		"history_enabled", cfg.Alert.History.Enabled,
+	log.Info("config loaded",
+		zap.Int("databases", len(cfg.Database)),
+		zap.Duration("scan_interval", cfg.Alert.ScanInterval.Duration),
+		zap.Bool("history_enabled", cfg.Alert.History.Enabled),
 	)
 
 	// Standalone mode: doris connection info is required.
 	if cfg.Doris.Host == "" {
-		slogger.Error("doris.host is required in standalone mode")
+		log.Error("doris.host is required in standalone mode")
 		os.Exit(1)
 	}
 
@@ -58,35 +68,40 @@ func main() {
 		Logger: logger.Default.LogMode(logger.Silent),
 	})
 	if err != nil {
-		slogger.Error("open db failed", "err", err)
+		log.Error("open db failed", zap.Error(err))
 		os.Exit(1)
 	}
 
 	sqlDB, err := db.DB()
 	if err != nil {
-		slogger.Error("get underlying sql.DB failed", "err", err)
+		log.Error("get underlying sql.DB failed", zap.Error(err))
 		os.Exit(1)
 	}
 	sqlDB.SetMaxOpenConns(5)
 	sqlDB.SetConnMaxLifetime(5 * time.Minute)
 	defer sqlDB.Close()
 
-	slogger.Info("connected to doris", "host", cfg.Doris.Host, "port", cfg.Doris.Port)
+	log.Info("connected to doris",
+		zap.String("host", cfg.Doris.Host),
+		zap.Int("port", cfg.Doris.Port),
+	)
 
 	// Build alert history (optional).
 	var history *alerter.AlertHistory
 	if cfg.Alert.History.Enabled {
-		history, err = alerter.NewHistory(&cfg.Alert.History, slogger)
+		history, err = alerter.NewHistory(&cfg.Alert.History,
+			alerter.WithHistoryLogger(log),
+		)
 		if err != nil {
-			slogger.Error("init alert history failed", "err", err)
+			log.Error("init alert history failed", zap.Error(err))
 			os.Exit(1)
 		}
 	}
 
 	// Build components.
-	scan := scanner.New(db, slogger)
-	alert := alerter.New(cfg, slogger, alerter.WithHistory(history))
-	notify := notifier.New(&cfg.Feishu, slogger)
+	scan := scanner.New(db, scanner.WithLogger(log))
+	alert := alerter.New(cfg, alerter.WithLogger(log), alerter.WithHistory(history))
+	notify := notifier.New(&cfg.Feishu, notifier.WithLogger(log))
 
 	// Build database and job filter from config.
 	var databases []string
@@ -107,7 +122,7 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		slogger.Info("shutting down...")
+		log.Info("shutting down...")
 		if history != nil {
 			history.Save()
 		}
@@ -135,25 +150,25 @@ func main() {
 	defer ticker.Stop()
 
 	// Run once immediately.
-	run(ctx, scan, alert, notify, history, databases, jobFilter, slogger)
+	run(ctx, scan, alert, notify, history, databases, jobFilter, log)
 
 	for {
 		select {
 		case <-ctx.Done():
-			slogger.Info("stopped")
+			log.Info("stopped")
 			return
 		case <-ticker.C:
-			run(ctx, scan, alert, notify, history, databases, jobFilter, slogger)
+			run(ctx, scan, alert, notify, history, databases, jobFilter, log)
 		}
 	}
 }
 
-func run(ctx context.Context, scan *scanner.Scanner, alert *alerter.Alerter, notify *notifier.Notifier, history *alerter.AlertHistory, databases []string, jobFilter map[string][]string, logger *slog.Logger) {
-	logger.Info("scanning routine load jobs...")
+func run(ctx context.Context, scan *scanner.Scanner, alert *alerter.Alerter, notify *notifier.Notifier, history *alerter.AlertHistory, databases []string, jobFilter map[string][]string, log glog.HLogger) {
+	log.Info("scanning routine load jobs...")
 
 	dbJobs, err := scan.QueryAllDatabases(ctx, databases, jobFilter)
 	if err != nil {
-		logger.Error("scan failed", "err", err)
+		log.Error("scan failed", zap.Error(err))
 		return
 	}
 
@@ -167,7 +182,10 @@ func run(ctx context.Context, scan *scanner.Scanner, alert *alerter.Alerter, not
 			}
 		}
 	}
-	logger.Info("scan complete", "total_jobs", totalJobs, "paused_jobs", pausedJobs)
+	log.Info("scan complete",
+		zap.Int("total_jobs", totalJobs),
+		zap.Int("paused_jobs", pausedJobs),
+	)
 
 	decisions := alert.Evaluate(ctx, dbJobs)
 
@@ -176,7 +194,10 @@ func run(ctx context.Context, scan *scanner.Scanner, alert *alerter.Alerter, not
 	for _, d := range decisions {
 		if d.Action == "skip" {
 			skipped++
-			logger.Debug("alert skipped", "job_id", d.Event.JobID, "reason", d.Reason)
+			log.Debug("alert skipped",
+				zap.Int64("job_id", d.Event.JobID),
+				zap.String("reason", d.Reason),
+			)
 			continue
 		}
 		// Enrich event with history data for the notification.
@@ -187,7 +208,10 @@ func run(ctx context.Context, scan *scanner.Scanner, alert *alerter.Alerter, not
 			}
 		}
 		if err := notify.Send(d); err != nil {
-			logger.Error("send alert failed", "job_id", d.Event.JobID, "err", err)
+			log.Error("send alert failed",
+				zap.Int64("job_id", d.Event.JobID),
+				zap.Error(err),
+			)
 			continue
 		}
 		// Update status only after successful send.
@@ -215,10 +239,17 @@ func run(ctx context.Context, scan *scanner.Scanner, alert *alerter.Alerter, not
 			}
 		}
 		if err := notify.SendRecovery(key, dbName, jobName, duration, sendCount); err != nil {
-			logger.Error("send recovery notification failed", "job_key", key, "err", err)
+			log.Error("send recovery notification failed",
+				zap.String("job_key", key),
+				zap.Error(err),
+			)
 		}
 		recovered++
 	}
 
-	logger.Info("alert cycle done", "sent", sent, "skipped", skipped, "recovered", recovered)
+	log.Info("alert cycle done",
+		zap.Int("sent", sent),
+		zap.Int("skipped", skipped),
+		zap.Int("recovered", recovered),
+	)
 }

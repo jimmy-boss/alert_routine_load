@@ -5,25 +5,43 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log/slog"
 	"strconv"
 	"strings"
 
 	"github.com/jimmy-boss/alert_routine_load/model"
+	glog "github.com/jimmy-boss/go-log/glog"
+	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
+
+// Option is a functional option for Scanner.
+type Option func(*Scanner)
+
+// WithLogger injects a logger implementation.
+func WithLogger(logger glog.HLoggerBase) Option {
+	return func(s *Scanner) {
+		s.logger = logger
+	}
+}
 
 // Scanner queries Doris SHOW ROUTINE LOAD for configured databases.
 type Scanner struct {
 	db     *gorm.DB
-	logger *slog.Logger
+	logger glog.HLoggerBase
 }
 
 // New creates a Scanner with an existing *gorm.DB connection.
 // Third-party callers can pass their own *gorm.DB directly,
 // no need to configure doris connection in YAML.
-func New(db *gorm.DB, logger *slog.Logger) *Scanner {
-	return &Scanner{db: db, logger: logger}
+func New(db *gorm.DB, opts ...Option) *Scanner {
+	s := &Scanner{db: db}
+	for _, opt := range opts {
+		opt(s)
+	}
+	if s.logger == nil {
+		s.logger = glog.GlobalLoggers["default"]
+	}
+	return s
 }
 
 // QueryJobs retrieves routine load jobs for the given database.
@@ -55,7 +73,7 @@ func (s *Scanner) QueryJobs(ctx context.Context, database string, jobNames []str
 			vals[i] = &ptrs[i]
 		}
 		if err := rows.Scan(vals...); err != nil {
-			s.logger.Warn("scan row failed", "err", err)
+			s.logger.Warn("scan row failed", zap.Error(err))
 			continue
 		}
 
@@ -85,7 +103,10 @@ func (s *Scanner) QueryAllDatabases(ctx context.Context, databases []string, job
 	for _, db := range databases {
 		jobs, err := s.QueryJobs(ctx, db, jobFilter[db])
 		if err != nil {
-			s.logger.Error("query failed", "database", db, "err", err)
+			s.logger.Error("query failed",
+				zap.String("database", db),
+				zap.Error(err),
+			)
 			continue
 		}
 		result[db] = jobs

@@ -35,11 +35,9 @@ alert_routine_load/
 │   └── scanner.go               # Doris SQL 查询（SHOW ROUTINE LOAD）、行解析、字段映射
 ├── conf/
 │   └── alert.yaml.example       # 示例配置文件
-├── docs/
-│   └── code-review-*.md         # 代码审查报告
-├── dev.md                       # 设计文档
 ├── go.mod
-└── Makefile_                    # 构建脚本（注意文件名带下划线）
+├── README.md
+└── Makefile_                   # 构建脚本（注意文件名带下划线）
 ```
 
 ### 文件关系
@@ -85,30 +83,31 @@ cp conf/alert.yaml.example conf/alert.yaml
 
 ```go
 import (
-    "log/slog"
-
     "github.com/jimmy-boss/alert_routine_load/alerter"
     "github.com/jimmy-boss/alert_routine_load/config"
     "github.com/jimmy-boss/alert_routine_load/notifier"
     "github.com/jimmy-boss/alert_routine_load/scanner"
+    glog "github.com/jimmy-boss/go-log/glog"
 
     "gorm.io/gorm"
 )
 
-func StartAlert(db *gorm.DB, appYAML []byte, logger *slog.Logger) {
+func StartAlert(db *gorm.DB, appYAML []byte, log glog.HLogger) {
     // 从宿主应用 YAML 中提取命名空间配置（doris 字段可省略）
     cfg, err := config.LoadFromYAML(appYAML, "doris_alert")
     if err != nil {
-        log.Fatal(err)
+        log.Fatal("load config failed", zap.Error(err))
     }
 
-    scan := scanner.New(db, logger)       // 直接传入已有的 *gorm.DB
-    alert := alerter.New(cfg, logger)
-    notify := notifier.New(&cfg.Feishu, logger)
+    scan := scanner.New(db, scanner.WithLogger(log))
+    alert := alerter.New(cfg, alerter.WithLogger(log))
+    notify := notifier.New(&cfg.Feishu, notifier.WithLogger(log))
 
     // ... 主循环逻辑见 cmd/main.go
 }
 ```
+
+> 所有组件均通过 `WithLogger` Option 注入日志实现，未注入时自动回退到 `glog.GlobalLoggers["default"]`。
 
 宿主应用配置文件示例：
 
@@ -254,7 +253,7 @@ make -f Makefile_ clean
 - Go 1.23.6
 - GORM（Doris SQL 查询）
 - gopkg.in/yaml.v3（配置解析）
-- slog（结构化日志）
+- go-log（结构化日志，基于 zap，支持日志轮转）
 
 ## 版本记录
 
@@ -264,3 +263,4 @@ make -f Makefile_ clean
 | 2026-01-05 | v1.1 | 新增告警历史持久化（双文件 JSON）、恢复通知、代码审查修复 |
 | 2026-01-06 | v1.2 | 新增命名空间配置加载（库模式）、`LoadFromYAML` API |
 | 2026-01-08 | v1.3 | Scanner 改用 GORM、doris 配置改为可选（库模式无需配置连接信息） |
+| 2026-06-01 | v1.4 | 日志从 log/slog 切换为 go-log/glog（统一 workspace 日志方案），所有组件支持 WithLogger Option 注入 |

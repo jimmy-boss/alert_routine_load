@@ -9,7 +9,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -17,21 +16,39 @@ import (
 	"github.com/jimmy-boss/alert_routine_load/alerter"
 	"github.com/jimmy-boss/alert_routine_load/config"
 	"github.com/jimmy-boss/alert_routine_load/model"
+	glog "github.com/jimmy-boss/go-log/glog"
+	"go.uber.org/zap"
 )
+
+// Option is a functional option for Notifier.
+type Option func(*Notifier)
+
+// WithLogger injects a logger implementation.
+func WithLogger(logger glog.HLoggerBase) Option {
+	return func(n *Notifier) {
+		n.logger = logger
+	}
+}
 
 // Notifier sends alert events to Feishu webhook.
 type Notifier struct {
 	cfg    *config.FeishuConfig
-	logger *slog.Logger
+	logger glog.HLoggerBase
 	client *http.Client
 }
 
-func New(cfg *config.FeishuConfig, logger *slog.Logger) *Notifier {
-	return &Notifier{
+func New(cfg *config.FeishuConfig, opts ...Option) *Notifier {
+	n := &Notifier{
 		cfg:    cfg,
-		logger: logger,
 		client: &http.Client{Timeout: 10 * time.Second},
 	}
+	for _, opt := range opts {
+		opt(n)
+	}
+	if n.logger == nil {
+		n.logger = glog.GlobalLoggers["default"]
+	}
+	return n
 }
 
 // Send dispatches an alert event to the Feishu webhook as an interactive card.
@@ -91,9 +108,9 @@ func (n *Notifier) Send(decision alerter.AlertDecision) error {
 	}
 
 	n.logger.Info("alert sent",
-		"job_id", e.JobID,
-		"job_name", e.JobName,
-		"database", e.Database,
+		zap.Int64("job_id", e.JobID),
+		zap.String("job_name", e.JobName),
+		zap.String("database", e.Database),
 	)
 	return nil
 }
@@ -146,10 +163,10 @@ func (n *Notifier) SendRecovery(jobKey string, database string, jobName string, 
 	}
 
 	n.logger.Info("recovery notification sent",
-		"job_key", jobKey,
-		"database", database,
-		"duration", duration.Round(time.Second),
-		"send_count", sendCount,
+		zap.String("job_key", jobKey),
+		zap.String("database", database),
+		zap.Duration("duration", duration.Round(time.Second)),
+		zap.Int("send_count", sendCount),
 	)
 	return nil
 }

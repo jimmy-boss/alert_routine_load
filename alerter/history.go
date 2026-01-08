@@ -4,7 +4,6 @@ package alerter
 import (
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -12,6 +11,8 @@ import (
 
 	"github.com/jimmy-boss/alert_routine_load/config"
 	"github.com/jimmy-boss/alert_routine_load/model"
+	glog "github.com/jimmy-boss/go-log/glog"
+	"go.uber.org/zap"
 )
 
 const (
@@ -19,24 +20,39 @@ const (
 	archiveFile = "alert_archive.json"
 )
 
+// HistoryOption is a functional option for AlertHistory.
+type HistoryOption func(*AlertHistory)
+
+// WithHistoryLogger injects a logger implementation for AlertHistory.
+func WithHistoryLogger(logger glog.HLoggerBase) HistoryOption {
+	return func(h *AlertHistory) {
+		h.logger = logger
+	}
+}
+
 // AlertHistory manages alert lifecycle records with dual-file JSON persistence.
 type AlertHistory struct {
-	dir     string
-	maxAge  time.Duration
-	logger  *slog.Logger
+	dir    string
+	maxAge time.Duration
+	logger glog.HLoggerBase
 
-	mu       sync.RWMutex
-	active   []model.AlertRecord // ongoing alerts (not yet recovered)
-	archive  []model.AlertRecord // recovered alerts
-	dirty    bool                // true if unsaved changes exist
+	mu      sync.RWMutex
+	active  []model.AlertRecord // ongoing alerts (not yet recovered)
+	archive []model.AlertRecord // recovered alerts
+	dirty   bool                // true if unsaved changes exist
 }
 
 // NewHistory creates an AlertHistory, loading existing data from disk.
-func NewHistory(cfg *config.HistoryConfig, logger *slog.Logger) (*AlertHistory, error) {
+func NewHistory(cfg *config.HistoryConfig, opts ...HistoryOption) (*AlertHistory, error) {
 	h := &AlertHistory{
 		dir:    cfg.Dir,
 		maxAge: cfg.MaxAge.Duration,
-		logger: logger,
+	}
+	for _, opt := range opts {
+		opt(h)
+	}
+	if h.logger == nil {
+		h.logger = glog.GlobalLoggers["default"]
 	}
 
 	// Ensure directory exists.
@@ -46,7 +62,7 @@ func NewHistory(cfg *config.HistoryConfig, logger *slog.Logger) (*AlertHistory, 
 
 	// Load existing records.
 	if err := h.load(); err != nil {
-		logger.Warn("failed to load history, starting fresh", "err", err)
+		h.logger.Warn("failed to load history, starting fresh", zap.Error(err))
 	}
 
 	// Purge expired archive records on startup.
@@ -71,9 +87,9 @@ func (h *AlertHistory) AddRecord(jobKey, jobName, db, reason string) {
 	h.dirty = true
 
 	h.logger.Info("alert record created",
-		"job_key", jobKey,
-		"job_name", jobName,
-		"database", db,
+		zap.String("job_key", jobKey),
+		zap.String("job_name", jobName),
+		zap.String("database", db),
 	)
 }
 
@@ -108,9 +124,9 @@ func (h *AlertHistory) MarkRecovered(jobKey, reason string) {
 			h.dirty = true
 
 			h.logger.Info("alert recovered",
-				"job_key", jobKey,
-				"duration", r.Duration().Round(time.Second),
-				"send_count", r.SendCount,
+				zap.String("job_key", jobKey),
+				zap.Duration("duration", r.Duration().Round(time.Second)),
+				zap.Int("send_count", r.SendCount),
 			)
 
 			// Persist immediately on recovery.
@@ -134,11 +150,11 @@ func (h *AlertHistory) saveLocked() {
 	}
 
 	if err := writeJSON(filepath.Join(h.dir, activeFile), h.active); err != nil {
-		h.logger.Error("save active records failed", "err", err)
+		h.logger.Error("save active records failed", zap.Error(err))
 		return
 	}
 	if err := writeJSON(filepath.Join(h.dir, archiveFile), h.archive); err != nil {
-		h.logger.Error("save archive records failed", "err", err)
+		h.logger.Error("save archive records failed", zap.Error(err))
 		return
 	}
 	h.dirty = false
@@ -162,8 +178,8 @@ func (h *AlertHistory) load() error {
 	h.archive = archive
 
 	h.logger.Info("history loaded",
-		"active", len(h.active),
-		"archive", len(h.archive),
+		zap.Int("active", len(h.active)),
+		zap.Int("archive", len(h.archive)),
 	)
 	return nil
 }
@@ -190,7 +206,10 @@ func (h *AlertHistory) purgeExpired() {
 		h.archive = kept
 		h.dirty = true
 		h.saveLocked()
-		h.logger.Info("purged expired archive records", "removed", removed, "remaining", len(kept))
+		h.logger.Info("purged expired archive records",
+			zap.Int("removed", removed),
+			zap.Int("remaining", len(kept)),
+		)
 	}
 }
 
