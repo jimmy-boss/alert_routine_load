@@ -1,0 +1,21 @@
+.PHONY: build test run clean
+
+BINARY=doris-alert
+BUILD_DIR=bin
+
+build:
+	@mkdir -p $(BUILD_DIR)
+	GOROOT="D:/goWork/go1.23.6" "D:/goWork/go1.23.6/bin/go" build -o $(BUILD_DIR)/$(BINARY) ./cmd/
+	@echo "✅ built $(BUILD_DIR)/$(BINARY)"
+
+test:
+	GOROOT="D:/goWork/go1.23.6" "D:/goWork/go1.23.6/bin/go" test ./... -v
+
+run: build
+	./$(BUILD_DIR)/$(BINARY) -c conf/alert.yaml
+
+clean:
+	rm -rf $(BUILD_DIR)
+
+lint:
+	@command -v golangci-lint >/dev/null && GOROOT="D:/goWork/go1.23.6" golangci-lint run ./... || echo "golangci-lint not installed"
