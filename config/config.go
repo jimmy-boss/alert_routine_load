@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"os"
+	"regexp"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -40,12 +41,29 @@ func (d Duration) MarshalYAML() (interface{}, error) {
 	return d.Duration.String(), nil
 }
 
+// DefaultSystemDBs is the built-in list of Doris system databases that are
+// always excluded in blacklist (scan_databases.mode=all) mode.
+var DefaultSystemDBs = []string{
+	"information_schema",
+	"__internal_schema",
+	"mysql",
+}
+
+// ScanDatabasesConfig controls how databases are discovered for monitoring.
+type ScanDatabasesConfig struct {
+	Mode              string   `yaml:"mode"`                     // "all" = auto-discover | "configured" = only database section (default)
+	Exclude           []string `yaml:"exclude"`                  // exact-match exclusions
+	ExcludePatterns   []string `yaml:"exclude_patterns"`         // regex exclusions
+	OverrideSystemDBs []string `yaml:"override_system_databases"` // additional system DBs to exclude
+}
+
 // Config is the top-level configuration.
 type Config struct {
-	Doris    DorisConfig    `yaml:"doris"`
-	Feishu   FeishuConfig   `yaml:"feishu"`
-	Alert    AlertConfig    `yaml:"alert"`
-	Database []DatabaseRule `yaml:"database"`
+	Doris          DorisConfig          `yaml:"doris"`
+	Feishu         FeishuConfig         `yaml:"feishu"`
+	Alert          AlertConfig          `yaml:"alert"`
+	ScanDatabases  ScanDatabasesConfig  `yaml:"scan_databases"`
+	Database       []DatabaseRule       `yaml:"database"`
 }
 
 type DorisConfig struct {
@@ -183,6 +201,9 @@ func finalize(c *Config) (*Config, error) {
 }
 
 func applyDefaults(c *Config) {
+	if c.ScanDatabases.Mode == "" {
+		c.ScanDatabases.Mode = "configured"
+	}
 	if c.Doris.Port == 0 {
 		c.Doris.Port = 9030
 	}
@@ -217,15 +238,74 @@ func validate(c *Config) error {
 	if c.Feishu.WebhookURL == "" {
 		return fmt.Errorf("feishu.webhook_url is required")
 	}
-	if len(c.Database) == 0 {
-		return fmt.Errorf("at least one database rule is required")
+
+	// Validate scan_databases mode.
+	switch c.ScanDatabases.Mode {
+	case "configured":
+		if len(c.Database) == 0 {
+			return fmt.Errorf("at least one database rule is required (mode=configured)")
+		}
+	case "all":
+		// database section is optional in "all" mode
+	default:
+		return fmt.Errorf("scan_databases.mode must be 'all' or 'configured', got %q", c.ScanDatabases.Mode)
 	}
+
+	// Validate exclude_patterns are valid regexps.
+	for _, pattern := range c.ScanDatabases.ExcludePatterns {
+		if _, err := regexp.Compile(pattern); err != nil {
+			return fmt.Errorf("scan_databases.exclude_patterns: invalid regex %q: %w", pattern, err)
+		}
+	}
+
 	for i, db := range c.Database {
 		if db.Database == "" {
 			return fmt.Errorf("database[%d].database is required", i)
 		}
 	}
 	return nil
+}
+
+// FilterDatabases filters a list of database names based on scan_databases config.
+// It removes: built-in system DBs, override_system_databases, exclude, and exclude_patterns.
+func (c *Config) FilterDatabases(allDBs []string) []string {
+	// Build exclusion set: DefaultSystemDBs ∪ OverrideSystemDBs ∪ Exclude
+	excludeSet := make(map[string]bool)
+	for _, db := range DefaultSystemDBs {
+		excludeSet[db] = true
+	}
+	for _, db := range c.ScanDatabases.OverrideSystemDBs {
+		excludeSet[db] = true
+	}
+	for _, db := range c.ScanDatabases.Exclude {
+		excludeSet[db] = true
+	}
+
+	// Compile exclude patterns.
+	var patterns []*regexp.Regexp
+	for _, p := range c.ScanDatabases.ExcludePatterns {
+		re, _ := regexp.Compile(p) // already validated in validate()
+		patterns = append(patterns, re)
+	}
+
+	var result []string
+	for _, db := range allDBs {
+		if excludeSet[db] {
+			continue
+		}
+		excluded := false
+		for _, re := range patterns {
+			if re.MatchString(db) {
+				excluded = true
+				break
+			}
+		}
+		if excluded {
+			continue
+		}
+		result = append(result, db)
+	}
+	return result
 }
 
 // GetEffective returns the resolved alert parameters for a given database + job name.

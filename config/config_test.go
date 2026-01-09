@@ -308,6 +308,171 @@ my_alert:
 	}
 }
 
+func TestScanDatabases_DefaultMode(t *testing.T) {
+	content := `
+feishu:
+  webhook_url: "https://example.com/hook"
+database:
+  - database: "db1"
+`
+	path := writeTemp(t, content)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.ScanDatabases.Mode != "configured" {
+		t.Errorf("default mode = %q, want %q", cfg.ScanDatabases.Mode, "configured")
+	}
+}
+
+func TestScanDatabases_ModeAll_NoDatabase(t *testing.T) {
+	content := `
+feishu:
+  webhook_url: "https://example.com/hook"
+scan_databases:
+  mode: "all"
+`
+	path := writeTemp(t, content)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.ScanDatabases.Mode != "all" {
+		t.Errorf("mode = %q, want %q", cfg.ScanDatabases.Mode, "all")
+	}
+	if len(cfg.Database) != 0 {
+		t.Errorf("database should be empty in mode=all, got %d", len(cfg.Database))
+	}
+}
+
+func TestScanDatabases_InvalidMode(t *testing.T) {
+	content := `
+feishu:
+  webhook_url: "https://example.com/hook"
+scan_databases:
+  mode: "invalid"
+database:
+  - database: "db1"
+`
+	path := writeTemp(t, content)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for invalid mode")
+	}
+}
+
+func TestScanDatabases_InvalidRegex(t *testing.T) {
+	content := `
+feishu:
+  webhook_url: "https://example.com/hook"
+scan_databases:
+  mode: "all"
+  exclude_patterns:
+    - "[invalid"
+`
+	path := writeTemp(t, content)
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for invalid regex")
+	}
+}
+
+func TestFilterDatabases_SystemDBs(t *testing.T) {
+	cfg := &Config{
+		ScanDatabases: ScanDatabasesConfig{Mode: "all"},
+	}
+	allDBs := []string{"information_schema", "__internal_schema", "mysql", "prod_db", "test_db"}
+	result := cfg.FilterDatabases(allDBs)
+	if len(result) != 2 {
+		t.Fatalf("result count = %d, want 2, got %v", len(result), result)
+	}
+	if result[0] != "prod_db" || result[1] != "test_db" {
+		t.Errorf("result = %v, want [prod_db test_db]", result)
+	}
+}
+
+func TestFilterDatabases_Exclude(t *testing.T) {
+	cfg := &Config{
+		ScanDatabases: ScanDatabasesConfig{
+			Mode:    "all",
+			Exclude: []string{"tmp_db", "staging"},
+		},
+	}
+	allDBs := []string{"prod_db", "tmp_db", "staging", "dev_db"}
+	result := cfg.FilterDatabases(allDBs)
+	if len(result) != 2 {
+		t.Fatalf("result count = %d, want 2, got %v", len(result), result)
+	}
+	if result[0] != "prod_db" || result[1] != "dev_db" {
+		t.Errorf("result = %v, want [prod_db dev_db]", result)
+	}
+}
+
+func TestFilterDatabases_ExcludePatterns(t *testing.T) {
+	cfg := &Config{
+		ScanDatabases: ScanDatabasesConfig{
+			Mode:            "all",
+			ExcludePatterns: []string{"^test_", ".*_backup$"},
+		},
+	}
+	allDBs := []string{"prod_db", "test_dev", "test_staging", "db_backup", "real_db"}
+	result := cfg.FilterDatabases(allDBs)
+	if len(result) != 2 {
+		t.Fatalf("result count = %d, want 2, got %v", len(result), result)
+	}
+	if result[0] != "prod_db" || result[1] != "real_db" {
+		t.Errorf("result = %v, want [prod_db real_db]", result)
+	}
+}
+
+func TestFilterDatabases_OverrideSystemDBs(t *testing.T) {
+	cfg := &Config{
+		ScanDatabases: ScanDatabasesConfig{
+			Mode:              "all",
+			OverrideSystemDBs: []string{"__statistics__"},
+		},
+	}
+	allDBs := []string{"information_schema", "__statistics__", "prod_db"}
+	result := cfg.FilterDatabases(allDBs)
+	if len(result) != 1 {
+		t.Fatalf("result count = %d, want 1, got %v", len(result), result)
+	}
+	if result[0] != "prod_db" {
+		t.Errorf("result = %v, want [prod_db]", result)
+	}
+}
+
+func TestFilterDatabases_ExcludeOverDatabase(t *testing.T) {
+	cfg := &Config{
+		ScanDatabases: ScanDatabasesConfig{
+			Mode:    "all",
+			Exclude: []string{"shared_db"},
+		},
+		Database: []DatabaseRule{
+			{Database: "shared_db"},
+		},
+	}
+	allDBs := []string{"shared_db", "prod_db"}
+	result := cfg.FilterDatabases(allDBs)
+	// exclude should take priority over database section
+	if len(result) != 1 {
+		t.Fatalf("result count = %d, want 1, got %v", len(result), result)
+	}
+	if result[0] != "prod_db" {
+		t.Errorf("result = %v, want [prod_db]", result)
+	}
+}
+
+func TestFilterDatabases_Empty(t *testing.T) {
+	cfg := &Config{
+		ScanDatabases: ScanDatabasesConfig{Mode: "all"},
+	}
+	result := cfg.FilterDatabases(nil)
+	if len(result) != 0 {
+		t.Errorf("result should be empty, got %v", result)
+	}
+}
+
 func writeTemp(t *testing.T, content string) string {
 	t.Helper()
 	f, err := os.CreateTemp(t.TempDir(), "config-*.yaml")

@@ -44,6 +44,26 @@ func New(db *gorm.DB, opts ...Option) *Scanner {
 	return s
 }
 
+// ShowDatabases executes SHOW DATABASES and returns the list of database names.
+func (s *Scanner) ShowDatabases(ctx context.Context) ([]string, error) {
+	rows, err := s.db.WithContext(ctx).Raw("SHOW DATABASES").Rows()
+	if err != nil {
+		return nil, fmt.Errorf("show databases: %w", err)
+	}
+	defer rows.Close()
+
+	var dbs []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			s.logger.Warn("scan database name failed", zap.Error(err))
+			continue
+		}
+		dbs = append(dbs, name)
+	}
+	return dbs, rows.Err()
+}
+
 // QueryJobs retrieves routine load jobs for the given database.
 // If jobNames is non-empty, only those jobs are checked.
 func (s *Scanner) QueryJobs(ctx context.Context, database string, jobNames []string) ([]model.RoutineLoadJob, error) {

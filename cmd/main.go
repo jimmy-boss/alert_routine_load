@@ -103,18 +103,6 @@ func main() {
 	alert := alerter.New(cfg, alerter.WithLogger(log), alerter.WithHistory(history))
 	notify := notifier.New(&cfg.Feishu, notifier.WithLogger(log))
 
-	// Build database and job filter from config.
-	var databases []string
-	jobFilter := make(map[string][]string) // db → []jobName
-	for _, dbRule := range cfg.Database {
-		databases = append(databases, dbRule.Database)
-		for _, j := range dbRule.Jobs {
-			if j.Name != "" {
-				jobFilter[dbRule.Database] = append(jobFilter[dbRule.Database], j.Name)
-			}
-		}
-	}
-
 	// Graceful shutdown.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -144,6 +132,14 @@ func main() {
 			}
 		}()
 	}
+
+	// Build database list and job filter.
+	databases, jobFilter, err := buildDatabaseList(ctx, cfg, scan, log)
+	if err != nil {
+		log.Error("build database list failed", zap.Error(err))
+		os.Exit(1)
+	}
+	log.Info("monitoring databases", zap.Int("count", len(databases)))
 
 	// Main loop.
 	ticker := time.NewTicker(cfg.Alert.ScanInterval.Duration)
@@ -252,4 +248,39 @@ func run(ctx context.Context, scan *scanner.Scanner, alert *alerter.Alerter, not
 		zap.Int("skipped", skipped),
 		zap.Int("recovered", recovered),
 	)
+}
+
+// buildDatabaseList builds the list of databases to monitor and the job filter
+// based on the scan_databases mode.
+func buildDatabaseList(ctx context.Context, cfg *config.Config, scan *scanner.Scanner, log glog.HLogger) ([]string, map[string][]string, error) {
+	var databases []string
+
+	switch cfg.ScanDatabases.Mode {
+	case "all":
+		allDBs, err := scan.ShowDatabases(ctx)
+		if err != nil {
+			return nil, nil, fmt.Errorf("show databases: %w", err)
+		}
+		databases = cfg.FilterDatabases(allDBs)
+		log.Info("auto-discovered databases",
+			zap.Int("total", len(allDBs)),
+			zap.Int("after_filter", len(databases)),
+		)
+	default: // "configured"
+		for _, dbRule := range cfg.Database {
+			databases = append(databases, dbRule.Database)
+		}
+	}
+
+	// Build job filter from database section (works for both modes).
+	jobFilter := make(map[string][]string)
+	for _, dbRule := range cfg.Database {
+		for _, j := range dbRule.Jobs {
+			if j.Name != "" {
+				jobFilter[dbRule.Database] = append(jobFilter[dbRule.Database], j.Name)
+			}
+		}
+	}
+
+	return databases, jobFilter, nil
 }

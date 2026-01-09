@@ -28,7 +28,19 @@ alert:
     dir: "data"                     # 持久化目录 (相对于程序运行目录)
     max_age: "720h"                 # 归档记录保留时长 (30 天)
 
-# 监控规则: 按数据库 → 作业粒度配置
+# 数据库扫描模式 (可选, 不配置则使用白名单模式)
+# scan_databases:
+#   mode: "all"                         # "all" = 自动发现所有数据库 | "configured" = 仅 database 段 (默认)
+#   exclude:                            # 精确排除 (在系统库内置过滤之上叠加)
+#     - "tmp_db"
+#     - "staging"
+#   exclude_patterns:                   # 正则排除
+#     - "^test_.*"
+#     - ".*_backup$"
+#   override_system_databases:          # 追加内置系统库排除列表 (默认: information_schema, __internal_schema, mysql)
+#     - "__statistics__"
+
+# 监控规则: 按数据库 → 作业粒度配置 (mode=configured 时必填, mode=all 时可选用于精细覆盖)
 database:
   - database: "your_database"
     alert:                            # 数据库级覆盖 (可选)

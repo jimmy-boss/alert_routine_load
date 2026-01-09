@@ -12,6 +12,7 @@
 - **恢复通知**：作业恢复时自动发送飞书卡片，包含持续时间和累计告警次数
 - **飞书签名**：支持 HMAC-SHA256 Webhook 签名验证
 - **库模式**：可作为第三方库嵌入宿主应用，支持命名空间配置加载
+- **黑名单模式**：通过 `SHOW DATABASES` 自动发现数据库，内置屏蔽系统库，支持正则排除
 
 ## 目录结构
 
@@ -169,6 +170,16 @@ database:
           backoff_factor: 3.0
 
   - database: "another_database"   # 监控整个数据库的所有作业
+
+# 黑名单模式（可选，不配置则使用白名单模式）
+# scan_databases:
+#   mode: "all"                     # "all" = 自动发现 | "configured" = 仅 database 段（默认）
+#   exclude:                        # 精确排除
+#     - "tmp_db"
+#   exclude_patterns:               # 正则排除
+#     - "^test_.*"
+#   override_system_databases:      # 追加内置系统库列表（默认: information_schema, __internal_schema, mysql）
+#     - "__statistics__"
 ```
 
 ### 三层配置优先级
@@ -264,3 +275,4 @@ make -f Makefile_ clean
 | 2026-01-06 | v1.2 | 新增命名空间配置加载（库模式）、`LoadFromYAML` API |
 | 2026-01-08 | v1.3 | Scanner 改用 GORM、doris 配置改为可选（库模式无需配置连接信息） |
 | 2026-06-01 | v1.4 | 日志从 log/slog 切换为 go-log/glog（统一 workspace 日志方案），所有组件支持 WithLogger Option 注入 |
+| 2026-06-01 | v1.5 | 新增黑名单模式（scan_databases），支持 SHOW DATABASES 自动发现 + 系统库内置过滤 + 正则排除 |
