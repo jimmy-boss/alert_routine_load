@@ -22,6 +22,10 @@ alert:
   error_truncate_len: 300           # 错误详情截断长度 (字符)
   fetch_error_url: true             # 是否获取错误 URL 详情
   error_url_timeout: "5s"           # 错误 URL 请求超时
+  # Lag 消费延迟告警 (可选, 默认关闭)
+  # lag:
+  #   enabled: true                 # 是否启用, 默认 false
+  #   threshold: 10000              # 单分区延迟阈值 (消息条数), 默认 10000
   # 告警历史持久化
   history:
     enabled: true                   # 是否启用告警历史, 默认 true
@@ -41,15 +45,21 @@ alert:
 #     - "__statistics__"
 
 # 监控规则: 按数据库 → 作业粒度配置 (mode=configured 时必填, mode=all 时可选用于精细覆盖)
+# 优先级: 作业级 > 数据库级 > 全局默认 (alert.default_*)
 database:
   - database: "your_database"
     alert:                            # 数据库级覆盖 (可选)
       initial_interval: "2m"
+      lag:                            # 数据库级 lag 覆盖 (可选)
+        enabled: true
+        threshold: 5000
     jobs:
       - name: "your_routine_load_job"
         alert:                        # 作业级覆盖 (可选, 最高优先级)
           initial_interval: "1m"
           backoff_factor: 3.0
+          lag:                        # 作业级 lag 覆盖 (可选, 最高优先级)
+            threshold: 1000
 
   # 监控整个数据库的所有作业 (使用全局默认参数)
   - database: "another_database"

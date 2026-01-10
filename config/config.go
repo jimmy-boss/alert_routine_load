@@ -93,6 +93,8 @@ type AlertConfig struct {
 	ErrorURLTimeout Duration `yaml:"error_url_timeout"`
 	// Alert history persistence.
 	History HistoryConfig `yaml:"history"`
+	// Lag alert configuration.
+	Lag LagConfig `yaml:"lag"`
 }
 
 // HistoryConfig controls alert history persistence.
@@ -100,6 +102,12 @@ type HistoryConfig struct {
 	Enabled bool     `yaml:"enabled"` // default true
 	Dir     string   `yaml:"dir"`     // persistence directory, default "data"
 	MaxAge  Duration `yaml:"max_age"` // how long to keep archived records, default 720h (30d)
+}
+
+// LagConfig controls lag-based alerting (data consumption delay).
+type LagConfig struct {
+	Enabled   bool  `yaml:"enabled"`   // default false
+	Threshold int64 `yaml:"threshold"` // per-partition lag threshold, default 10000
 }
 
 type DatabaseRule struct {
@@ -115,9 +123,16 @@ type JobRule struct {
 
 // AlertOverride allows per-database / per-job override of timing.
 type AlertOverride struct {
-	InitialInterval *Duration `yaml:"initial_interval,omitempty"`
-	MaxInterval     *Duration `yaml:"max_interval,omitempty"`
-	BackoffFactor   *float64  `yaml:"backoff_factor,omitempty"`
+	InitialInterval *Duration    `yaml:"initial_interval,omitempty"`
+	MaxInterval     *Duration    `yaml:"max_interval,omitempty"`
+	BackoffFactor   *float64     `yaml:"backoff_factor,omitempty"`
+	Lag             *LagOverride `yaml:"lag,omitempty"`
+}
+
+// LagOverride allows per-database / per-job override of lag alert config.
+type LagOverride struct {
+	Enabled   *bool  `yaml:"enabled,omitempty"`
+	Threshold *int64 `yaml:"threshold,omitempty"`
 }
 
 // Load reads and parses the config file (standalone mode, top-level keys).
@@ -231,6 +246,9 @@ func applyDefaults(c *Config) {
 	if c.Alert.History.MaxAge.Duration == 0 {
 		c.Alert.History.MaxAge.Duration = 720 * time.Hour // 30 days
 	}
+	if c.Alert.Lag.Threshold == 0 {
+		c.Alert.Lag.Threshold = 10000
+	}
 }
 
 func validate(c *Config) error {
@@ -342,6 +360,40 @@ func (c *Config) GetEffective(dbName, jobName string) (initialInterval, maxInter
 				}
 				if job.Alert.BackoffFactor != nil {
 					backoffFactor = *job.Alert.BackoffFactor
+				}
+			}
+		}
+	}
+	return
+}
+
+// GetEffectiveLag returns the resolved lag alert config for a given database + job name.
+// Priority: job-level > database-level > global default.
+func (c *Config) GetEffectiveLag(dbName, jobName string) (enabled bool, threshold int64) {
+	enabled = c.Alert.Lag.Enabled
+	threshold = c.Alert.Lag.Threshold
+
+	for _, db := range c.Database {
+		if db.Database != dbName {
+			continue
+		}
+		// database-level override
+		if db.Alert != nil && db.Alert.Lag != nil {
+			if db.Alert.Lag.Enabled != nil {
+				enabled = *db.Alert.Lag.Enabled
+			}
+			if db.Alert.Lag.Threshold != nil {
+				threshold = *db.Alert.Lag.Threshold
+			}
+		}
+		// job-level override
+		for _, job := range db.Jobs {
+			if job.Name == jobName && job.Alert != nil && job.Alert.Lag != nil {
+				if job.Alert.Lag.Enabled != nil {
+					enabled = *job.Alert.Lag.Enabled
+				}
+				if job.Alert.Lag.Threshold != nil {
+					threshold = *job.Alert.Lag.Threshold
 				}
 			}
 		}

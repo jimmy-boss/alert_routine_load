@@ -211,7 +211,7 @@ func run(ctx context.Context, scan *scanner.Scanner, alert *alerter.Alerter, not
 			continue
 		}
 		// Update status only after successful send.
-		alert.UpdateStatus(d.StatusKey)
+		alert.UpdateStatus(d.StatusKey, d.Event.Database, d.Event.JobName, d.Event.Reason)
 		sent++
 	}
 
@@ -234,11 +234,14 @@ func run(ctx context.Context, scan *scanner.Scanner, alert *alerter.Alerter, not
 				jobName = record.JobName
 			}
 		}
-		if err := notify.SendRecovery(key, dbName, jobName, duration, sendCount); err != nil {
-			log.Error("send recovery notification failed",
-				zap.String("job_key", key),
-				zap.Error(err),
-			)
+		// Only send recovery notification if alerts were actually sent.
+		if sendCount > 0 {
+			if err := notify.SendRecovery(key, dbName, jobName, duration, sendCount); err != nil {
+				log.Error("send recovery notification failed",
+					zap.String("job_key", key),
+					zap.Error(err),
+				)
+			}
 		}
 		recovered++
 	}

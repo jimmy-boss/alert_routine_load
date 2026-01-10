@@ -463,6 +463,96 @@ func TestFilterDatabases_ExcludeOverDatabase(t *testing.T) {
 	}
 }
 
+func TestLagConfig_DefaultDisabled(t *testing.T) {
+	content := `
+feishu:
+  webhook_url: "https://example.com/hook"
+database:
+  - database: "db1"
+`
+	path := writeTemp(t, content)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if cfg.Alert.Lag.Enabled {
+		t.Error("lag should be disabled by default")
+	}
+	if cfg.Alert.Lag.Threshold != 10000 {
+		t.Errorf("lag threshold = %d, want 10000", cfg.Alert.Lag.Threshold)
+	}
+}
+
+func TestLagConfig_Enabled(t *testing.T) {
+	content := `
+feishu:
+  webhook_url: "https://example.com/hook"
+alert:
+  lag:
+    enabled: true
+    threshold: 5000
+database:
+  - database: "db1"
+`
+	path := writeTemp(t, content)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if !cfg.Alert.Lag.Enabled {
+		t.Error("lag should be enabled")
+	}
+	if cfg.Alert.Lag.Threshold != 5000 {
+		t.Errorf("lag threshold = %d, want 5000", cfg.Alert.Lag.Threshold)
+	}
+}
+
+func TestGetEffectiveLag_ThreeLayerOverride(t *testing.T) {
+	globalEnabled := true
+	dbThreshold := int64(5000)
+	jobThreshold := int64(1000)
+
+	cfg := &Config{
+		Alert: AlertConfig{
+			Lag: LagConfig{Enabled: true, Threshold: 10000},
+		},
+		Database: []DatabaseRule{
+			{
+				Database: "db1",
+				Alert: &AlertOverride{
+					Lag: &LagOverride{Threshold: &dbThreshold},
+				},
+				Jobs: []JobRule{
+					{
+						Name: "job1",
+						Alert: &AlertOverride{
+							Lag: &LagOverride{Enabled: &globalEnabled, Threshold: &jobThreshold},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Global default
+	enabled, threshold := cfg.GetEffectiveLag("other_db", "other_job")
+	if !enabled || threshold != 10000 {
+		t.Errorf("global: enabled=%v threshold=%d, want true 10000", enabled, threshold)
+	}
+
+	// Database-level override
+	enabled, threshold = cfg.GetEffectiveLag("db1", "other_job")
+	if !enabled || threshold != 5000 {
+		t.Errorf("db-level: enabled=%v threshold=%d, want true 5000", enabled, threshold)
+	}
+
+	// Job-level override
+	enabled, threshold = cfg.GetEffectiveLag("db1", "job1")
+	if !enabled || threshold != 1000 {
+		t.Errorf("job-level: enabled=%v threshold=%d, want true 1000", enabled, threshold)
+	}
+}
+
 func TestFilterDatabases_Empty(t *testing.T) {
 	cfg := &Config{
 		ScanDatabases: ScanDatabasesConfig{Mode: "all"},

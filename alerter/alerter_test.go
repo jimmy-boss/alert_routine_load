@@ -100,7 +100,7 @@ func TestUpdateStatus(t *testing.T) {
 	key := "testdb:123"
 
 	// First update: creates new entry.
-	a.UpdateStatus(key)
+	a.UpdateStatus(key, "testdb", "job1", "test reason")
 	st, ok := a.status[key]
 	if !ok {
 		t.Fatalf("expected status entry for key %q", key)
@@ -113,7 +113,7 @@ func TestUpdateStatus(t *testing.T) {
 	}
 
 	// Second update: increments count.
-	a.UpdateStatus(key)
+	a.UpdateStatus(key, "testdb", "job1", "test reason")
 	st = a.status[key]
 	if st.SendCount != 2 {
 		t.Errorf("SendCount = %d, want 2", st.SendCount)
@@ -154,5 +154,63 @@ func TestRemoveStale(t *testing.T) {
 	}
 	if len(recovered) != 2 {
 		t.Errorf("recovered count = %d, want 2", len(recovered))
+	}
+}
+
+func TestCheckLag_Exceeded(t *testing.T) {
+	job := model.RoutineLoadJob{
+		Lag: `{"0":0,"1":80009,"2":0,"4":80008,"7":80019}`,
+	}
+	result := checkLag(job, 10000)
+	if len(result) != 3 {
+		t.Fatalf("exceeded count = %d, want 3, got %v", len(result), result)
+	}
+	// Should be sorted by partition ID.
+	if result[0].PartitionID != "1" || result[0].LagCount != 80009 {
+		t.Errorf("result[0] = %+v", result[0])
+	}
+	if result[1].PartitionID != "4" || result[1].LagCount != 80008 {
+		t.Errorf("result[1] = %+v", result[1])
+	}
+	if result[2].PartitionID != "7" || result[2].LagCount != 80019 {
+		t.Errorf("result[2] = %+v", result[2])
+	}
+}
+
+func TestCheckLag_NotExceeded(t *testing.T) {
+	job := model.RoutineLoadJob{
+		Lag: `{"0":0,"1":5000,"2":3000}`,
+	}
+	result := checkLag(job, 10000)
+	if len(result) != 0 {
+		t.Errorf("should not exceed, got %v", result)
+	}
+}
+
+func TestCheckLag_EmptyLag(t *testing.T) {
+	job := model.RoutineLoadJob{Lag: ""}
+	result := checkLag(job, 10000)
+	if len(result) != 0 {
+		t.Errorf("empty lag should return nil, got %v", result)
+	}
+}
+
+func TestCheckLag_InvalidJSON(t *testing.T) {
+	job := model.RoutineLoadJob{Lag: "invalid"}
+	result := checkLag(job, 10000)
+	if len(result) != 0 {
+		t.Errorf("invalid json should return nil, got %v", result)
+	}
+}
+
+func TestFormatLagSummary(t *testing.T) {
+	lags := []model.LagInfo{
+		{PartitionID: "1", LagCount: 80009},
+		{PartitionID: "7", LagCount: 80019},
+	}
+	result := formatLagSummary(lags)
+	expected := "partition 1=80009, partition 7=80019"
+	if result != expected {
+		t.Errorf("formatLagSummary = %q, want %q", result, expected)
 	}
 }

@@ -1,7 +1,16 @@
 // Package model defines the core domain types for Doris Routine Load alerting.
 package model
 
-import "time"
+import (
+	"encoding/json"
+	"time"
+)
+
+// LagInfo represents a single partition's lag that exceeds the threshold.
+type LagInfo struct {
+	PartitionID string
+	LagCount    int64
+}
 
 // RoutineLoadJob represents a single row from SHOW ROUTINE LOAD.
 type RoutineLoadJob struct {
@@ -70,4 +79,19 @@ func (r *AlertRecord) Duration() time.Duration {
 // IsActive returns true if the alert is still ongoing.
 func (r *AlertRecord) IsActive() bool {
 	return r.RecoveredAt.IsZero()
+}
+
+// ParseLag parses the Lag JSON string from SHOW ROUTINE LOAD into a map of
+// partitionID → lagCount. Returns nil if the input is empty or malformed.
+//
+// Example input: '{"0":0,"1":80009,"2":0}'
+func ParseLag(raw string) map[string]int64 {
+	if raw == "" {
+		return nil
+	}
+	var m map[string]int64
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		return nil
+	}
+	return m
 }

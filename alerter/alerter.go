@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -77,7 +78,11 @@ func (a *Alerter) Evaluate(ctx context.Context, dbJobs map[string][]model.Routin
 
 	for dbName, jobs := range dbJobs {
 		for _, job := range jobs {
-			if !isPaused(job.State) {
+			paused := isPaused(job.State)
+			lagEnabled, _ := a.cfg.GetEffectiveLag(dbName, job.Name)
+			runningWithLag := isRunning(job.State) && lagEnabled
+
+			if !paused && !runningWithLag {
 				continue
 			}
 
@@ -114,11 +119,6 @@ func (a *Alerter) evaluateOne(ctx context.Context, key, dbName string, job model
 	}
 	a.mu.Unlock()
 
-	// Create history record for first-time alert.
-	if isNew && a.history != nil {
-		a.history.AddRecord(key, job.Name, dbName, job.ReasonOfStateChanged)
-	}
-
 	if !shouldSend {
 		return AlertDecision{
 			Action: "skip",
@@ -133,12 +133,35 @@ func (a *Alerter) evaluateOne(ctx context.Context, key, dbName string, job model
 		errorDetail = truncate(errorDetail, a.cfg.Alert.ErrorTruncateLen)
 	}
 
+	// Determine alert state and lag info.
+	alertState := job.State
+	lagEnabled, lagThreshold := a.cfg.GetEffectiveLag(dbName, job.Name)
+
+	if isRunning(job.State) && lagEnabled {
+		// RUNNING + lag check: alert with State="LAG" if any partition exceeds threshold.
+		exceeded := checkLag(job, lagThreshold)
+		if len(exceeded) == 0 {
+			return AlertDecision{Action: "skip", Reason: "lag below threshold"}
+		}
+		alertState = "LAG"
+		errorDetail = formatLagSummary(exceeded)
+	} else if isPaused(job.State) && lagEnabled {
+		// PAUSED + lag: always append all non-zero lag info to existing error detail.
+		lagStr := formatAllNonZeroLag(job)
+		if lagStr != "" {
+			if errorDetail != "" {
+				errorDetail += "\n---\n"
+			}
+			errorDetail += "Lag: " + lagStr
+		}
+	}
+
 	// Build event.
 	event := model.AlertEvent{
 		JobID:       job.ID,
 		JobName:     job.Name,
 		Database:    dbName,
-		State:       job.State,
+		State:       alertState,
 		PauseTime:   job.PauseTime,
 		Reason:      job.ReasonOfStateChanged,
 		ErrorDetail: errorDetail,
@@ -154,19 +177,26 @@ func (a *Alerter) evaluateOne(ctx context.Context, key, dbName string, job model
 
 // UpdateStatus updates the alert status for a given key after a successful send.
 // Must be called by the caller only after notify.Send() succeeds.
-func (a *Alerter) UpdateStatus(key string) {
+// dbName and jobName are used to create a history record on first send.
+func (a *Alerter) UpdateStatus(key, dbName, jobName, reason string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	st, exists := a.status[key]
-	if !exists {
-		st = &model.AlertStatus{}
+	isNew := !exists
+	if isNew {
+		st = &model.AlertStatus{FirstAlertAt: time.Now()}
 		a.status[key] = st
 	}
 	st.LastSentAt = time.Now()
 	st.SendCount++
 
-	// Update history record.
+	// Create history record on first successful send (not before).
+	if isNew && a.history != nil {
+		a.history.AddRecord(key, jobName, dbName, reason)
+	}
+
+	// Update history send count.
 	if a.history != nil {
 		a.history.UpdateSendCount(key)
 	}
@@ -287,9 +317,67 @@ func truncate(s string, maxLen int) string {
 	return string(runes[:maxLen]) + "...(truncated)"
 }
 
+// checkLag checks if any partition's lag exceeds the threshold.
+// Returns the list of exceeded partitions (sorted by partition ID).
+func checkLag(job model.RoutineLoadJob, threshold int64) []model.LagInfo {
+	parsed := model.ParseLag(job.Lag)
+	if len(parsed) == 0 {
+		return nil
+	}
+
+	var exceeded []model.LagInfo
+	for pid, lag := range parsed {
+		if lag > threshold {
+			exceeded = append(exceeded, model.LagInfo{PartitionID: pid, LagCount: lag})
+		}
+	}
+
+	// Sort by partition ID for deterministic output.
+	sort.Slice(exceeded, func(i, j int) bool {
+		return exceeded[i].PartitionID < exceeded[j].PartitionID
+	})
+	return exceeded
+}
+
+// formatAllNonZeroLag formats all non-zero lag partitions into a human-readable string.
+// Example: "partition 1=80009, partition 4=80008, partition 7=80019"
+func formatAllNonZeroLag(job model.RoutineLoadJob) string {
+	parsed := model.ParseLag(job.Lag)
+	if len(parsed) == 0 {
+		return ""
+	}
+	var lags []model.LagInfo
+	for pid, lag := range parsed {
+		if lag > 0 {
+			lags = append(lags, model.LagInfo{PartitionID: pid, LagCount: lag})
+		}
+	}
+	if len(lags) == 0 {
+		return ""
+	}
+	sort.Slice(lags, func(i, j int) bool {
+		return lags[i].PartitionID < lags[j].PartitionID
+	})
+	return formatLagSummary(lags)
+}
+
+// formatLagSummary formats lag info into a human-readable string.
+// Example: "partition 1=80009, partition 4=80008, partition 7=80019"
+func formatLagSummary(lags []model.LagInfo) string {
+	parts := make([]string, len(lags))
+	for i, l := range lags {
+		parts[i] = fmt.Sprintf("partition %s=%d", l.PartitionID, l.LagCount)
+	}
+	return strings.Join(parts, ", ")
+}
+
 func isPaused(state string) bool {
 	s := strings.ToUpper(strings.TrimSpace(state))
 	return s == "PAUSED" || s == "PAUSE"
+}
+
+func isRunning(state string) bool {
+	return strings.ToUpper(strings.TrimSpace(state)) == "RUNNING"
 }
 
 // computeDelay returns the delay for the Nth alert send using exponential backoff.

@@ -174,8 +174,11 @@ func (n *Notifier) SendRecovery(jobKey string, database string, jobName string, 
 func buildCard(e model.AlertEvent) map[string]interface{} {
 	// Status color.
 	color := "red"
-	if strings.ToUpper(e.State) == "PAUSED" {
+	switch strings.ToUpper(e.State) {
+	case "PAUSED":
 		color = "orange"
+	case "LAG":
+		color = "yellow"
 	}
 
 	// Header.
