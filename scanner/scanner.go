@@ -66,6 +66,8 @@ func (s *Scanner) ShowDatabases(ctx context.Context) ([]string, error) {
 
 // QueryJobs retrieves routine load jobs for the given database.
 // If jobNames is non-empty, only those jobs are checked.
+// NOTE: This method uses USE database which sets connection-level state.
+// It must NOT be called concurrently — call sequentially or use a dedicated connection.
 func (s *Scanner) QueryJobs(ctx context.Context, database string, jobNames []string) ([]model.RoutineLoadJob, error) {
 	gormDB := s.db.WithContext(ctx)
 	gormDB.Exec(fmt.Sprintf("USE `%s`", database))

@@ -52,15 +52,17 @@ type Alerter struct {
 	client  *http.Client
 	history *AlertHistory
 
-	mu     sync.Mutex
-	status map[string]*model.AlertStatus // key = "db:jobId"
+	mu          sync.Mutex
+	status      map[string]*model.AlertStatus // key = "db:jobId"
+	lagCleanup  map[string]bool               // lag-sourced keys to silently clean up
 }
 
 func New(cfg *config.Config, opts ...Option) *Alerter {
 	a := &Alerter{
-		cfg:    cfg,
-		client: &http.Client{Timeout: cfg.Alert.ErrorURLTimeout.Duration},
-		status: make(map[string]*model.AlertStatus),
+		cfg:        cfg,
+		client:     &http.Client{Timeout: cfg.Alert.ErrorURLTimeout.Duration},
+		status:     make(map[string]*model.AlertStatus),
+		lagCleanup: make(map[string]bool),
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -73,6 +75,8 @@ func New(cfg *config.Config, opts ...Option) *Alerter {
 
 // Evaluate takes all jobs from all databases, filters paused ones,
 // fetches error details, and returns decisions.
+// Note: STOPPED and CANCELLED jobs are intentionally not monitored —
+// they are terminal states outside the scope of this alerting system.
 func (a *Alerter) Evaluate(ctx context.Context, dbJobs map[string][]model.RoutineLoadJob) []AlertDecision {
 	var decisions []AlertDecision
 
@@ -100,7 +104,11 @@ func (a *Alerter) evaluateOne(ctx context.Context, key, dbName string, job model
 	st, exists := a.status[key]
 	isNew := !exists
 	if isNew {
-		st = &model.AlertStatus{FirstAlertAt: time.Now()}
+		source := "paused"
+		if isRunning(job.State) {
+			source = "lag"
+		}
+		st = &model.AlertStatus{FirstAlertAt: time.Now(), Source: source}
 		a.status[key] = st
 	}
 
@@ -141,6 +149,10 @@ func (a *Alerter) evaluateOne(ctx context.Context, key, dbName string, job model
 		// RUNNING + lag check: alert with State="LAG" if any partition exceeds threshold.
 		exceeded := checkLag(job, lagThreshold)
 		if len(exceeded) == 0 {
+			// Mark for silent cleanup in next RemoveStale cycle.
+			a.mu.Lock()
+			a.lagCleanup[key] = true
+			a.mu.Unlock()
 			return AlertDecision{Action: "skip", Reason: "lag below threshold"}
 		}
 		alertState = "LAG"
@@ -175,6 +187,13 @@ func (a *Alerter) evaluateOne(ctx context.Context, key, dbName string, job model
 	}
 }
 
+// GetStatus returns the alert status for the given key, or nil if not found.
+func (a *Alerter) GetStatus(key string) *model.AlertStatus {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.status[key]
+}
+
 // UpdateStatus updates the alert status for a given key after a successful send.
 // Must be called by the caller only after notify.Send() succeeds.
 // dbName and jobName are used to create a history record on first send.
@@ -205,25 +224,45 @@ func (a *Alerter) UpdateStatus(key, dbName, jobName, reason string) {
 // RemoveStale cleans up status entries for jobs that are no longer paused.
 // Returns the list of recovered job keys for notification.
 func (a *Alerter) RemoveStale(dbJobs map[string][]model.RoutineLoadJob) []string {
-	active := make(map[string]bool)
+	pausedSet := make(map[string]bool)
+	runningSet := make(map[string]bool)
 	for dbName, jobs := range dbJobs {
 		for _, job := range jobs {
+			key := fmt.Sprintf("%s:%d", dbName, job.ID)
 			if isPaused(job.State) {
-				active[fmt.Sprintf("%s:%d", dbName, job.ID)] = true
+				pausedSet[key] = true
+			}
+			if isRunning(job.State) {
+				runningSet[key] = true
 			}
 		}
 	}
 
 	var recoveredKeys []string
 	a.mu.Lock()
-	for k := range a.status {
-		if !active[k] {
-			recoveredKeys = append(recoveredKeys, k)
-			// Mark recovery in history before deleting status.
-			if a.history != nil {
-				a.history.MarkRecovered(k, "state no longer PAUSED")
+	for k, st := range a.status {
+		switch st.Source {
+		case "lag":
+			if a.lagCleanup[k] {
+				// Lag below threshold — silently remove, no recovery notification.
+				delete(a.status, k)
+				delete(a.lagCleanup, k)
+			} else if !runningSet[k] {
+				// Job no longer RUNNING — mark as recovered.
+				recoveredKeys = append(recoveredKeys, k)
+				if a.history != nil {
+					a.history.MarkRecovered(k, "job no longer running")
+				}
+				delete(a.status, k)
 			}
-			delete(a.status, k)
+		default: // "paused"
+			if !pausedSet[k] {
+				recoveredKeys = append(recoveredKeys, k)
+				if a.history != nil {
+					a.history.MarkRecovered(k, "state no longer PAUSED")
+				}
+				delete(a.status, k)
+			}
 		}
 	}
 	a.mu.Unlock()
@@ -240,6 +279,7 @@ func (a *Alerter) fetchAndDedup(ctx context.Context, rawURLs string) string {
 
 	seen := make(map[string]bool)
 	var parts []string
+	failed := 0
 
 	for _, u := range urls {
 		u = strings.TrimSpace(u)
@@ -252,6 +292,7 @@ func (a *Alerter) fetchAndDedup(ctx context.Context, rawURLs string) string {
 				zap.String("url", u),
 				zap.Error(err),
 			)
+			failed++
 			continue
 		}
 		normalized := strings.TrimSpace(body)
@@ -266,6 +307,9 @@ func (a *Alerter) fetchAndDedup(ctx context.Context, rawURLs string) string {
 		parts = append(parts, normalized)
 	}
 
+	if len(parts) == 0 && failed > 0 {
+		return "(failed to fetch error details)"
+	}
 	return strings.Join(parts, "\n---\n")
 }
 

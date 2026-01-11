@@ -146,7 +146,7 @@ func main() {
 	defer ticker.Stop()
 
 	// Run once immediately.
-	run(ctx, scan, alert, notify, history, databases, jobFilter, log)
+	runWithTimeout(ctx, cfg.Alert.ScanInterval.Duration, scan, alert, notify, history, databases, jobFilter, log)
 
 	for {
 		select {
@@ -154,9 +154,16 @@ func main() {
 			log.Info("stopped")
 			return
 		case <-ticker.C:
-			run(ctx, scan, alert, notify, history, databases, jobFilter, log)
+			runWithTimeout(ctx, cfg.Alert.ScanInterval.Duration, scan, alert, notify, history, databases, jobFilter, log)
 		}
 	}
+}
+
+// runWithTimeout wraps run() with a timeout context to prevent indefinite blocking.
+func runWithTimeout(ctx context.Context, timeout time.Duration, scan *scanner.Scanner, alert *alerter.Alerter, notify *notifier.Notifier, history *alerter.AlertHistory, databases []string, jobFilter map[string][]string, log glog.HLogger) {
+	runCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	run(runCtx, scan, alert, notify, history, databases, jobFilter, log)
 }
 
 func run(ctx context.Context, scan *scanner.Scanner, alert *alerter.Alerter, notify *notifier.Notifier, history *alerter.AlertHistory, databases []string, jobFilter map[string][]string, log glog.HLogger) {
@@ -196,12 +203,10 @@ func run(ctx context.Context, scan *scanner.Scanner, alert *alerter.Alerter, not
 			)
 			continue
 		}
-		// Enrich event with history data for the notification.
-		if history != nil {
-			if record := history.FindRecord(d.StatusKey); record != nil {
-				d.Event.Duration = record.Duration()
-				d.Event.TotalSendCount = record.SendCount + 1 // +1 for current send
-			}
+		// Enrich event with duration and send count from in-memory status.
+		if st := alert.GetStatus(d.StatusKey); st != nil {
+			d.Event.Duration = time.Since(st.FirstAlertAt)
+			d.Event.TotalSendCount = st.SendCount + 1 // +1 for current send
 		}
 		if err := notify.Send(d); err != nil {
 			log.Error("send alert failed",
@@ -244,6 +249,11 @@ func run(ctx context.Context, scan *scanner.Scanner, alert *alerter.Alerter, not
 			}
 		}
 		recovered++
+	}
+
+	// Flush history once at end of cycle (not per-alert).
+	if history != nil {
+		history.Save()
 	}
 
 	log.Info("alert cycle done",

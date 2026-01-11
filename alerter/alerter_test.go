@@ -125,10 +125,10 @@ func TestRemoveStale(t *testing.T) {
 		status: make(map[string]*model.AlertStatus),
 	}
 
-	// Seed status with two entries.
-	a.status["db1:1"] = &model.AlertStatus{SendCount: 3}
-	a.status["db1:2"] = &model.AlertStatus{SendCount: 1}
-	a.status["db2:3"] = &model.AlertStatus{SendCount: 2}
+	// Seed status with paused-sourced entries.
+	a.status["db1:1"] = &model.AlertStatus{SendCount: 3, Source: "paused"}
+	a.status["db1:2"] = &model.AlertStatus{SendCount: 1, Source: "paused"}
+	a.status["db2:3"] = &model.AlertStatus{SendCount: 2, Source: "paused"}
 
 	// Only db1:1 is still paused; others should be removed.
 	dbJobs := map[string][]model.RoutineLoadJob{
@@ -154,6 +154,47 @@ func TestRemoveStale(t *testing.T) {
 	}
 	if len(recovered) != 2 {
 		t.Errorf("recovered count = %d, want 2", len(recovered))
+	}
+}
+
+func TestRemoveStale_LagSource(t *testing.T) {
+	a := &Alerter{
+		status:     make(map[string]*model.AlertStatus),
+		lagCleanup: make(map[string]bool),
+	}
+
+	// Seed: lag-sourced entry marked for silent cleanup (lag below threshold).
+	a.status["db1:1"] = &model.AlertStatus{SendCount: 2, Source: "lag"}
+	a.lagCleanup["db1:1"] = true
+	// Seed: lag-sourced entry (job no longer running).
+	a.status["db1:2"] = &model.AlertStatus{SendCount: 1, Source: "lag"}
+
+	dbJobs := map[string][]model.RoutineLoadJob{
+		"db1": {
+			{ID: 1, State: "RUNNING"}, // still running, lag below threshold
+			{ID: 2, State: "STOPPED"}, // no longer running
+		},
+	}
+
+	recovered := a.RemoveStale(dbJobs)
+
+	// db1:1 should be silently cleaned (lag below threshold, no recovery).
+	if _, ok := a.status["db1:1"]; ok {
+		t.Error("db1:1 should have been removed (lag below threshold)")
+	}
+	if _, ok := a.lagCleanup["db1:1"]; ok {
+		t.Error("db1:1 lagCleanup should have been cleared")
+	}
+	// db1:2 should be recovered (job no longer running).
+	if _, ok := a.status["db1:2"]; ok {
+		t.Error("db1:2 should have been removed (job stopped)")
+	}
+	// Only db1:2 should be in recovered list (db1:1 is silent cleanup).
+	if len(recovered) != 1 {
+		t.Errorf("recovered count = %d, want 1, got %v", len(recovered), recovered)
+	}
+	if len(recovered) > 0 && recovered[0] != "db1:2" {
+		t.Errorf("recovered[0] = %q, want %q", recovered[0], "db1:2")
 	}
 }
 

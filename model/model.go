@@ -52,6 +52,7 @@ type AlertStatus struct {
 	LastSentAt   time.Time
 	SendCount    int
 	NextDelaySec int
+	Source       string // "paused" or "lag" — determines recovery behavior
 }
 
 // AlertRecord represents the full lifecycle of one alert episode.

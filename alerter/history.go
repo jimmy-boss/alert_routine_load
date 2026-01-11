@@ -65,6 +65,9 @@ func NewHistory(cfg *config.HistoryConfig, opts ...HistoryOption) (*AlertHistory
 		h.logger.Warn("failed to load history, starting fresh", zap.Error(err))
 	}
 
+	// Ensure JSON files exist on first run (write empty arrays if missing).
+	h.ensureFiles()
+
 	// Purge expired archive records on startup.
 	h.purgeExpired()
 
@@ -160,6 +163,19 @@ func (h *AlertHistory) saveLocked() {
 	h.dirty = false
 }
 
+// ensureFiles creates empty JSON files if they don't exist yet.
+func (h *AlertHistory) ensureFiles() {
+	activePath := filepath.Join(h.dir, activeFile)
+	archivePath := filepath.Join(h.dir, archiveFile)
+
+	if _, err := os.Stat(activePath); os.IsNotExist(err) {
+		writeJSON(activePath, []model.AlertRecord{})
+	}
+	if _, err := os.Stat(archivePath); os.IsNotExist(err) {
+		writeJSON(archivePath, []model.AlertRecord{})
+	}
+}
+
 // load reads records from disk.
 func (h *AlertHistory) load() error {
 	activePath := filepath.Join(h.dir, activeFile)
@@ -223,20 +239,21 @@ func (h *AlertHistory) GetActiveRecords() []model.AlertRecord {
 	return out
 }
 
-// FindRecord returns the active record for the given job key, if any.
+// FindRecord returns a copy of the active record for the given job key, if any.
 func (h *AlertHistory) FindRecord(jobKey string) *model.AlertRecord {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
 	for i := range h.active {
 		if h.active[i].JobKey == jobKey {
-			return &h.active[i]
+			out := h.active[i]
+			return &out
 		}
 	}
 	return nil
 }
 
-// FindArchivedRecord returns the most recent archived record for the given job key.
+// FindArchivedRecord returns a copy of the most recent archived record for the given job key.
 func (h *AlertHistory) FindArchivedRecord(jobKey string) *model.AlertRecord {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -244,7 +261,8 @@ func (h *AlertHistory) FindArchivedRecord(jobKey string) *model.AlertRecord {
 	// Search from end (most recent).
 	for i := len(h.archive) - 1; i >= 0; i-- {
 		if h.archive[i].JobKey == jobKey {
-			return &h.archive[i]
+			out := h.archive[i]
+			return &out
 		}
 	}
 	return nil
