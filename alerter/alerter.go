@@ -168,16 +168,18 @@ func (a *Alerter) evaluateOne(ctx context.Context, key, dbName string, job model
 		}
 	}
 
-	// Build event.
+	// Build event with duration and send count from in-memory status.
 	event := model.AlertEvent{
-		JobID:       job.ID,
-		JobName:     job.Name,
-		Database:    dbName,
-		State:       alertState,
-		PauseTime:   job.PauseTime,
-		Reason:      job.ReasonOfStateChanged,
-		ErrorDetail: errorDetail,
-		Timestamp:   now,
+		JobID:          job.ID,
+		JobName:        job.Name,
+		Database:       dbName,
+		State:          alertState,
+		PauseTime:      job.PauseTime,
+		Reason:         job.ReasonOfStateChanged,
+		ErrorDetail:    errorDetail,
+		Timestamp:      now,
+		Duration:       now.Sub(st.FirstAlertAt),
+		TotalSendCount: st.SendCount + 1, // +1 for current send
 	}
 
 	return AlertDecision{
@@ -185,13 +187,6 @@ func (a *Alerter) evaluateOne(ctx context.Context, key, dbName string, job model
 		Action:    "send",
 		StatusKey: key,
 	}
-}
-
-// GetStatus returns the alert status for the given key, or nil if not found.
-func (a *Alerter) GetStatus(key string) *model.AlertStatus {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.status[key]
 }
 
 // UpdateStatus updates the alert status for a given key after a successful send.

@@ -50,7 +50,8 @@ func TestFormatDuration(t *testing.T) {
 		{5 * time.Minute, "5分0秒"},
 		{1 * time.Hour, "1小时0分钟"},
 		{2*time.Hour + 15*time.Minute, "2小时15分钟"},
-		{25 * time.Hour, "25小时0分钟"},
+		{25 * time.Hour, "1天1小时"},
+		{72 * time.Hour + 30*time.Minute, "3天0小时"},
 		{0, "0秒"},
 	}
 	for _, tt := range tests {

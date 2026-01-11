@@ -1,4 +1,4 @@
-.PHONY: build test run clean
+.PHONY: build test run clean lint verify
 
 BINARY=doris-alert
 BUILD_DIR=bin
@@ -19,3 +19,7 @@ clean:
 
 lint:
 	@command -v golangci-lint >/dev/null && golangci-lint run ./... || echo "golangci-lint not installed"
+
+verify:
+	go mod verify
+	@echo "✅ go.sum verified"

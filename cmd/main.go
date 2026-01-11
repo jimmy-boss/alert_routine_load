@@ -203,11 +203,6 @@ func run(ctx context.Context, scan *scanner.Scanner, alert *alerter.Alerter, not
 			)
 			continue
 		}
-		// Enrich event with duration and send count from in-memory status.
-		if st := alert.GetStatus(d.StatusKey); st != nil {
-			d.Event.Duration = time.Since(st.FirstAlertAt)
-			d.Event.TotalSendCount = st.SendCount + 1 // +1 for current send
-		}
 		if err := notify.Send(d); err != nil {
 			log.Error("send alert failed",
 				zap.Int64("job_id", d.Event.JobID),
@@ -223,6 +218,7 @@ func run(ctx context.Context, scan *scanner.Scanner, alert *alerter.Alerter, not
 	// Clean up status for recovered jobs and send recovery notifications.
 	recoveredKeys := alert.RemoveStale(dbJobs)
 	recovered := 0
+	notified := 0
 	for _, key := range recoveredKeys {
 		// Extract database name from key (format: "db:jobId").
 		dbName := ""
@@ -247,6 +243,7 @@ func run(ctx context.Context, scan *scanner.Scanner, alert *alerter.Alerter, not
 					zap.Error(err),
 				)
 			}
+			notified++
 		}
 		recovered++
 	}
@@ -260,6 +257,7 @@ func run(ctx context.Context, scan *scanner.Scanner, alert *alerter.Alerter, not
 		zap.Int("sent", sent),
 		zap.Int("skipped", skipped),
 		zap.Int("recovered", recovered),
+		zap.Int("recovery_notified", notified),
 	)
 }
 

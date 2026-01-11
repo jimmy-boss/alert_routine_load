@@ -319,9 +319,13 @@ func buildRecoveryCard(database, jobName string, duration time.Duration, sendCou
 
 func formatDuration(d time.Duration) string {
 	d = d.Round(time.Second)
-	h := int(d.Hours())
+	days := int(d.Hours()) / 24
+	h := int(d.Hours()) % 24
 	m := int(d.Minutes()) % 60
 	s := int(d.Seconds()) % 60
+	if days > 0 {
+		return fmt.Sprintf("%d天%d小时", days, h)
+	}
 	if h > 0 {
 		return fmt.Sprintf("%d小时%d分钟", h, m)
 	}
