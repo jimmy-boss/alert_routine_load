@@ -24,7 +24,7 @@ func WithLogger(logger glog.HLoggerBase) Option {
 	}
 }
 
-// Scanner queries Doris SHOW ROUTINE LOAD for configured databases.
+// Scanner queries Doris routine load jobs.
 type Scanner struct {
 	db     *gorm.DB
 	logger glog.HLoggerBase
@@ -64,16 +64,65 @@ func (s *Scanner) ShowDatabases(ctx context.Context) ([]string, error) {
 	return dbs, rows.Err()
 }
 
-// QueryJobs retrieves routine load jobs for the given database.
-// If jobNames is non-empty, only those jobs are checked.
-// NOTE: This method uses USE database which sets connection-level state.
-// It must NOT be called concurrently — call sequentially or use a dedicated connection.
-func (s *Scanner) QueryJobs(ctx context.Context, database string, jobNames []string) ([]model.RoutineLoadJob, error) {
-	gormDB := s.db.WithContext(ctx)
-	gormDB.Exec(fmt.Sprintf("USE `%s`", database))
-	rows, err := gormDB.Raw("SHOW ROUTINE LOAD").Rows()
+// JobRef is a reference to a routine load job (database + name).
+type JobRef struct {
+	DBName  string
+	JobName string
+}
+
+// QueryJobList discovers routine load jobs via information_schema.
+// If databases is non-empty, only those databases are queried.
+// If jobFilter is non-empty, only those job names are included.
+// Returns a list of JobRef (database + job name pairs).
+func (s *Scanner) QueryJobList(ctx context.Context, databases []string, jobFilter map[string][]string) ([]JobRef, error) {
+	query := "SELECT DB_NAME, JOB_NAME FROM information_schema.routine_load_jobs"
+	var args []interface{}
+
+	if len(databases) > 0 {
+		placeholders := make([]string, len(databases))
+		for i, db := range databases {
+			placeholders[i] = "?"
+			args = append(args, db)
+		}
+		query += " WHERE DB_NAME IN (" + strings.Join(placeholders, ",") + ")"
+	}
+
+	rows, err := s.db.WithContext(ctx).Raw(query, args...).Rows()
 	if err != nil {
-		return nil, fmt.Errorf("query routine load [%s]: %w", database, err)
+		return nil, fmt.Errorf("query job list: %w", err)
+	}
+	defer rows.Close()
+
+	// Build job name filter set per database.
+	var refs []JobRef
+	for rows.Next() {
+		var dbName, jobName string
+		if err := rows.Scan(&dbName, &jobName); err != nil {
+			s.logger.Warn("scan job list row failed", zap.Error(err))
+			continue
+		}
+		// Apply job name filter if configured.
+		if names, ok := jobFilter[dbName]; ok && len(names) > 0 {
+			nameSet := make(map[string]bool, len(names))
+			for _, n := range names {
+				nameSet[n] = true
+			}
+			if !nameSet[jobName] {
+				continue
+			}
+		}
+		refs = append(refs, JobRef{DBName: dbName, JobName: jobName})
+	}
+	return refs, rows.Err()
+}
+
+// QueryJobDetail retrieves full details for a single routine load job.
+// Uses SHOW ROUTINE LOAD FOR `db`.`job` — no USE database needed.
+func (s *Scanner) QueryJobDetail(ctx context.Context, dbName, jobName string) (*model.RoutineLoadJob, error) {
+	query := fmt.Sprintf("SHOW ROUTINE LOAD FOR `%s`.`%s`", dbName, jobName)
+	rows, err := s.db.WithContext(ctx).Raw(query).Rows()
+	if err != nil {
+		return nil, fmt.Errorf("show routine load for %s.%s: %w", dbName, jobName, err)
 	}
 	defer rows.Close()
 
@@ -82,56 +131,55 @@ func (s *Scanner) QueryJobs(ctx context.Context, database string, jobNames []str
 		return nil, fmt.Errorf("columns: %w", err)
 	}
 
-	nameSet := make(map[string]bool, len(jobNames))
-	for _, n := range jobNames {
-		nameSet[n] = true
+	if !rows.Next() {
+		return nil, fmt.Errorf("no routine load job found: %s.%s", dbName, jobName)
 	}
 
-	var jobs []model.RoutineLoadJob
-	for rows.Next() {
-		vals := make([]interface{}, len(cols))
-		ptrs := make([]sql.NullString, len(cols))
-		for i := range vals {
-			vals[i] = &ptrs[i]
-		}
-		if err := rows.Scan(vals...); err != nil {
-			s.logger.Warn("scan row failed", zap.Error(err))
-			continue
-		}
-
-		colMap := make(map[string]string, len(cols))
-		for i, c := range cols {
-			if ptrs[i].Valid {
-				colMap[c] = ptrs[i].String
-			}
-		}
-
-		job := parseJob(colMap)
-
-		// Filter by job name if configured.
-		if len(nameSet) > 0 && !nameSet[job.Name] {
-			continue
-		}
-
-		jobs = append(jobs, job)
+	vals := make([]interface{}, len(cols))
+	ptrs := make([]sql.NullString, len(cols))
+	for i := range vals {
+		vals[i] = &ptrs[i]
 	}
-	return jobs, rows.Err()
+	if err := rows.Scan(vals...); err != nil {
+		return nil, fmt.Errorf("scan %s.%s: %w", dbName, jobName, err)
+	}
+
+	colMap := make(map[string]string, len(cols))
+	for i, c := range cols {
+		if ptrs[i].Valid {
+			colMap[c] = ptrs[i].String
+		}
+	}
+
+	job := parseJob(colMap)
+	job.Name = jobName // ensure name is set from the query parameter
+	return &job, nil
 }
 
 // QueryAllDatabases queries routine load for every database in the config.
 // Returns a map of database → jobs.
+// Uses information_schema to discover jobs, then SHOW ROUTINE LOAD FOR for details.
+// No USE database statement — safe for concurrent use.
 func (s *Scanner) QueryAllDatabases(ctx context.Context, databases []string, jobFilter map[string][]string) (map[string][]model.RoutineLoadJob, error) {
-	result := make(map[string][]model.RoutineLoadJob, len(databases))
-	for _, db := range databases {
-		jobs, err := s.QueryJobs(ctx, db, jobFilter[db])
+	// Step 1: Discover jobs via information_schema.
+	refs, err := s.QueryJobList(ctx, databases, jobFilter)
+	if err != nil {
+		return nil, fmt.Errorf("query job list: %w", err)
+	}
+
+	// Step 2: Get details for each job.
+	result := make(map[string][]model.RoutineLoadJob)
+	for _, ref := range refs {
+		job, err := s.QueryJobDetail(ctx, ref.DBName, ref.JobName)
 		if err != nil {
-			s.logger.Error("query failed",
-				zap.String("database", db),
+			s.logger.Error("query job detail failed",
+				zap.String("database", ref.DBName),
+				zap.String("job", ref.JobName),
 				zap.Error(err),
 			)
 			continue
 		}
-		result[db] = jobs
+		result[ref.DBName] = append(result[ref.DBName], *job)
 	}
 	return result, nil
 }

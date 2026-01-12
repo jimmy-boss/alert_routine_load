@@ -284,3 +284,4 @@ make -f Makefile_ clean
 | 2026-01-10 | v1.7 | 修复 Lag 误报恢复通知 + FindRecord 数据竞争（返回副本） |
 | 2026-01-11 | v1.8 | 修复 Important 级别：新增 notifier/scanner 测试、Save 优化、fetchAndDedup 占位符、run 超时 |
 | 2026-01-11 | v1.9 | 修复 Minor 级别：formatDuration 天级别、计数拆分、GetStatus 内聚、Makefile verify |
+| 2026-01-12 | v1.10.0 | Scanner 优化：移除 USE database 并发风险，改用 information_schema 发现作业 + SHOW ROUTINE LOAD FOR 获取详情 |
