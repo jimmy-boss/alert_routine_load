@@ -29,7 +29,7 @@ func newTestHistory(t *testing.T) (*AlertHistory, string) {
 func TestAddRecord(t *testing.T) {
 	h, _ := newTestHistory(t)
 
-	h.AddRecord("db1:100", "job1", "db1", "some error")
+	h.AddRecord("db1:100", "job1", "db1", "some error", "paused")
 
 	if len(h.active) != 1 {
 		t.Fatalf("active count = %d, want 1", len(h.active))
@@ -58,7 +58,7 @@ func TestAddRecord(t *testing.T) {
 func TestUpdateSendCount(t *testing.T) {
 	h, _ := newTestHistory(t)
 
-	h.AddRecord("db1:100", "job1", "db1", "")
+	h.AddRecord("db1:100", "job1", "db1", "", "paused")
 	h.UpdateSendCount("db1:100")
 	h.UpdateSendCount("db1:100")
 
@@ -80,7 +80,7 @@ func TestUpdateSendCount_NonExistentKey(t *testing.T) {
 func TestMarkRecovered(t *testing.T) {
 	h, dir := newTestHistory(t)
 
-	h.AddRecord("db1:100", "job1", "db1", "error reason")
+	h.AddRecord("db1:100", "job1", "db1", "error reason", "paused")
 	h.UpdateSendCount("db1:100")
 
 	// Small delay so duration > 0.
@@ -138,8 +138,8 @@ func TestSaveAndLoad(t *testing.T) {
 		maxAge: 720 * time.Hour,
 		logger: newTestLogger(),
 	}
-	h1.AddRecord("db1:100", "job1", "db1", "")
-	h1.AddRecord("db2:200", "job2", "db2", "")
+	h1.AddRecord("db1:100", "job1", "db1", "", "paused")
+	h1.AddRecord("db2:200", "job2", "db2", "", "paused")
 	h1.UpdateSendCount("db1:100")
 	h1.Save()
 
@@ -205,8 +205,8 @@ func TestPurgeExpired(t *testing.T) {
 func TestGetActiveRecords(t *testing.T) {
 	h, _ := newTestHistory(t)
 
-	h.AddRecord("db1:100", "job1", "db1", "")
-	h.AddRecord("db2:200", "job2", "db2", "")
+	h.AddRecord("db1:100", "job1", "db1", "", "paused")
+	h.AddRecord("db2:200", "job2", "db2", "", "paused")
 
 	records := h.GetActiveRecords()
 	if len(records) != 2 {
@@ -224,7 +224,7 @@ func TestGetActiveRecords(t *testing.T) {
 func TestFindRecord(t *testing.T) {
 	h, _ := newTestHistory(t)
 
-	h.AddRecord("db1:100", "job1", "db1", "")
+	h.AddRecord("db1:100", "job1", "db1", "", "paused")
 
 	r := h.FindRecord("db1:100")
 	if r == nil {

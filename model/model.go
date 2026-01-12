@@ -62,9 +62,11 @@ type AlertRecord struct {
 	JobName      string    `json:"job_name"`
 	Database     string    `json:"database"`
 	FirstAlertAt time.Time `json:"first_alert_at"` // first alert time
+	LastSentAt   time.Time `json:"last_sent_at"`   // last alert send time (for backoff across restarts)
 	RecoveredAt  time.Time `json:"recovered_at"`   // recovery time, zero = still active
 	SendCount    int       `json:"send_count"`     // total alerts sent
 	LastReason   string    `json:"last_reason"`    // last state change reason
+	Source       string    `json:"source"`         // "paused" or "lag"
 }
 
 // Duration returns the alert duration.

@@ -211,8 +211,13 @@ func run(ctx context.Context, scan *scanner.Scanner, alert *alerter.Alerter, not
 			continue
 		}
 		// Update status only after successful send.
-		alert.UpdateStatus(d.StatusKey, d.Event.Database, d.Event.JobName, d.Event.Reason)
+		alert.UpdateStatus(d.StatusKey, &d)
 		sent++
+	}
+
+	// Flush history after alert loop (before recovery, in case of timeout).
+	if history != nil && sent > 0 {
+		history.Save()
 	}
 
 	// Clean up status for recovered jobs and send recovery notifications.

@@ -16,7 +16,7 @@ import (
 
 	"github.com/jimmy-boss/alert_routine_load/config"
 	"github.com/jimmy-boss/alert_routine_load/model"
-	glog "github.com/jimmy-boss/go-log/glog"
+	"github.com/jimmy-boss/go-log/glog"
 	"go.uber.org/zap"
 )
 
@@ -52,17 +52,15 @@ type Alerter struct {
 	client  *http.Client
 	history *AlertHistory
 
-	mu          sync.Mutex
-	status      map[string]*model.AlertStatus // key = "db:jobId"
-	lagCleanup  map[string]bool               // lag-sourced keys to silently clean up
+	mu     sync.Mutex
+	status map[string]*model.AlertStatus // key = "db:jobId"
 }
 
 func New(cfg *config.Config, opts ...Option) *Alerter {
 	a := &Alerter{
-		cfg:        cfg,
-		client:     &http.Client{Timeout: cfg.Alert.ErrorURLTimeout.Duration},
-		status:     make(map[string]*model.AlertStatus),
-		lagCleanup: make(map[string]bool),
+		cfg:    cfg,
+		client: &http.Client{Timeout: cfg.Alert.ErrorURLTimeout.Duration},
+		status: make(map[string]*model.AlertStatus),
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -70,6 +68,8 @@ func New(cfg *config.Config, opts ...Option) *Alerter {
 	if a.logger == nil {
 		a.logger = glog.GlobalLoggers["default"]
 	}
+	// Restore in-memory status from history active records to preserve backoff state across restarts.
+	a.restoreFromHistory()
 	return a
 }
 
@@ -99,17 +99,28 @@ func (a *Alerter) Evaluate(ctx context.Context, dbJobs map[string][]model.Routin
 }
 
 func (a *Alerter) evaluateOne(ctx context.Context, key, dbName string, job model.RoutineLoadJob) AlertDecision {
+	// Determine lag config before lock.
+	lagEnabled, _ := a.cfg.GetEffectiveLag(dbName, job.Name)
+
 	// Lock: read status and determine if we should send.
 	a.mu.Lock()
 	st, exists := a.status[key]
 	isNew := !exists
 	if isNew {
 		source := "paused"
-		if isRunning(job.State) {
+		if isRunning(job.State) && lagEnabled {
 			source = "lag"
 		}
-		st = &model.AlertStatus{FirstAlertAt: time.Now(), Source: source}
+		//firstAlert := parsePauseTime(job.PauseTime)
+		st = &model.AlertStatus{ /*FirstAlertAt: firstAlert,*/ Source: source}
 		a.status[key] = st
+	} else if st.Source == "" {
+		// Backward compat: old entries without Source field. Once set, source is immutable.
+		if isRunning(job.State) && lagEnabled {
+			st.Source = "lag"
+		} else {
+			st.Source = "paused"
+		}
 	}
 
 	shouldSend := true
@@ -149,10 +160,6 @@ func (a *Alerter) evaluateOne(ctx context.Context, key, dbName string, job model
 		// RUNNING + lag check: alert with State="LAG" if any partition exceeds threshold.
 		exceeded := checkLag(job, lagThreshold)
 		if len(exceeded) == 0 {
-			// Mark for silent cleanup in next RemoveStale cycle.
-			a.mu.Lock()
-			a.lagCleanup[key] = true
-			a.mu.Unlock()
 			return AlertDecision{Action: "skip", Reason: "lag below threshold"}
 		}
 		alertState = "LAG"
@@ -166,6 +173,22 @@ func (a *Alerter) evaluateOne(ctx context.Context, key, dbName string, job model
 			}
 			errorDetail += "Lag: " + lagStr
 		}
+	}
+
+	// 处理一下告警起始时间
+	if st.FirstAlertAt.IsZero() {
+		if st.Source == "lag" {
+			if isRunning(job.State) {
+				st.FirstAlertAt = time.Now()
+			}
+		} else {
+			if isPaused(job.State) {
+				st.FirstAlertAt = parsePauseTime(job.PauseTime)
+			}
+		}
+	}
+	if st.FirstAlertAt.IsZero() {
+		st.FirstAlertAt = time.Now()
 	}
 
 	// Build event with duration and send count from in-memory status.
@@ -189,25 +212,58 @@ func (a *Alerter) evaluateOne(ctx context.Context, key, dbName string, job model
 	}
 }
 
+// restoreFromHistory restores in-memory AlertStatus from history active records.
+// This preserves backoff state (SendCount, FirstAlertAt) across process restarts.
+func (a *Alerter) restoreFromHistory() {
+	if a.history == nil {
+		return
+	}
+	records := a.history.GetActiveRecords()
+	for _, r := range records {
+		lastSent := r.LastSentAt
+		if lastSent.IsZero() {
+			lastSent = r.FirstAlertAt // backward compat: old records without LastSentAt
+		}
+		source := r.Source
+		if source == "" {
+			source = "paused" // backward compat: old records without Source
+		}
+		a.status[r.JobKey] = &model.AlertStatus{
+			FirstAlertAt: r.FirstAlertAt,
+			LastSentAt:   lastSent,
+			SendCount:    r.SendCount,
+			Source:       source,
+		}
+	}
+	if len(records) > 0 {
+		a.logger.Info("restored status from history",
+			zap.Int("count", len(records)),
+		)
+	}
+}
+
 // UpdateStatus updates the alert status for a given key after a successful send.
 // Must be called by the caller only after notify.Send() succeeds.
 // dbName and jobName are used to create a history record on first send.
-func (a *Alerter) UpdateStatus(key, dbName, jobName, reason string) {
+func (a *Alerter) UpdateStatus(key string, d *AlertDecision) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	st, exists := a.status[key]
-	isNew := !exists
-	if isNew {
-		st = &model.AlertStatus{FirstAlertAt: time.Now()}
+	if !exists {
+		st = &model.AlertStatus{}
 		a.status[key] = st
 	}
 	st.LastSentAt = time.Now()
 	st.SendCount++
+	// 处置source
+	if isPaused(d.Event.State) && st.Source == "lag" {
+		st.Source = "paused"
+	}
 
-	// Create history record on first successful send (not before).
-	if isNew && a.history != nil {
-		a.history.AddRecord(key, jobName, dbName, reason)
+	// Create history record if not yet tracked (independent of in-memory status).
+	if a.history != nil && a.history.FindRecord(key) == nil {
+		a.history.AddRecord(key, d.Event.JobName, d.Event.Database, d.Event.Reason, st.Source)
 	}
 
 	// Update history send count.
@@ -238,18 +294,15 @@ func (a *Alerter) RemoveStale(dbJobs map[string][]model.RoutineLoadJob) []string
 	for k, st := range a.status {
 		switch st.Source {
 		case "lag":
-			if a.lagCleanup[k] {
-				// Lag below threshold — silently remove, no recovery notification.
-				delete(a.status, k)
-				delete(a.lagCleanup, k)
-			} else if !runningSet[k] {
-				// Job no longer RUNNING — mark as recovered.
+			if !runningSet[k] && !pausedSet[k] {
+				// Job disappeared from scan results — mark as recovered.
 				recoveredKeys = append(recoveredKeys, k)
 				if a.history != nil {
-					a.history.MarkRecovered(k, "job no longer running")
+					a.history.MarkRecovered(k, "lag alert recovered")
 				}
 				delete(a.status, k)
 			}
+			// Still RUNNING or PAUSED: leave status alone, backoff continues.
 		default: // "paused"
 			if !pausedSet[k] {
 				recoveredKeys = append(recoveredKeys, k)
@@ -408,6 +461,26 @@ func formatLagSummary(lags []model.LagInfo) string {
 		parts[i] = fmt.Sprintf("partition %s=%d", l.PartitionID, l.LagCount)
 	}
 	return strings.Join(parts, ", ")
+}
+
+// parsePauseTime tries to parse Doris PauseTime string, falls back to now.
+func parsePauseTime(s string) time.Time {
+	s = strings.TrimSpace(s)
+	fmt.Println(1111, s)
+	if s == "" {
+		return time.Now()
+	}
+	// Doris PauseTime format: "2026-06-04 15:12:01"
+	for _, layout := range []string{
+		"2006-01-02 15:04:05",
+		time.RFC3339,
+		"2006-01-02T15:04:05",
+	} {
+		if t, err := time.ParseInLocation(layout, s, time.Local); err == nil {
+			return t
+		}
+	}
+	return time.Now()
 }
 
 func isPaused(state string) bool {

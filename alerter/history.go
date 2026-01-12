@@ -75,7 +75,7 @@ func NewHistory(cfg *config.HistoryConfig, opts ...HistoryOption) (*AlertHistory
 }
 
 // AddRecord creates a new alert record for a job that just entered PAUSED state.
-func (h *AlertHistory) AddRecord(jobKey, jobName, db, reason string) {
+func (h *AlertHistory) AddRecord(jobKey, jobName, db, reason, source string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -84,7 +84,9 @@ func (h *AlertHistory) AddRecord(jobKey, jobName, db, reason string) {
 		JobName:      jobName,
 		Database:     db,
 		FirstAlertAt: time.Now(),
+		LastSentAt:   time.Now(),
 		LastReason:   reason,
+		Source:       source,
 	}
 	h.active = append(h.active, record)
 	h.dirty = true
@@ -104,6 +106,7 @@ func (h *AlertHistory) UpdateSendCount(jobKey string) {
 	for i := range h.active {
 		if h.active[i].JobKey == jobKey {
 			h.active[i].SendCount++
+			h.active[i].LastSentAt = time.Now()
 			h.dirty = true
 			return
 		}
@@ -161,6 +164,11 @@ func (h *AlertHistory) saveLocked() {
 		return
 	}
 	h.dirty = false
+	h.logger.Info("history saved",
+		zap.Int("active", len(h.active)),
+		zap.Int("archive", len(h.archive)),
+		zap.String("dir", h.dir),
+	)
 }
 
 // ensureFiles creates empty JSON files if they don't exist yet.

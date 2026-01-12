@@ -16,7 +16,7 @@ import (
 	"github.com/jimmy-boss/alert_routine_load/alerter"
 	"github.com/jimmy-boss/alert_routine_load/config"
 	"github.com/jimmy-boss/alert_routine_load/model"
-	glog "github.com/jimmy-boss/go-log/glog"
+	"github.com/jimmy-boss/go-log/glog"
 	"go.uber.org/zap"
 )
 

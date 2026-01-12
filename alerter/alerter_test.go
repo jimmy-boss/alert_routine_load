@@ -1,9 +1,12 @@
 package alerter
 
 import (
+	"context"
+	"net/http"
 	"testing"
 	"time"
 
+	"github.com/jimmy-boss/alert_routine_load/config"
 	"github.com/jimmy-boss/alert_routine_load/model"
 )
 
@@ -98,9 +101,18 @@ func TestUpdateStatus(t *testing.T) {
 	}
 
 	key := "testdb:123"
+	d := &AlertDecision{
+		Event: model.AlertEvent{
+			JobID:    123,
+			JobName:  "job1",
+			Database: "testdb",
+			Reason:   "test reason",
+			State:    "PAUSED",
+		},
+	}
 
 	// First update: creates new entry.
-	a.UpdateStatus(key, "testdb", "job1", "test reason")
+	a.UpdateStatus(key, d)
 	st, ok := a.status[key]
 	if !ok {
 		t.Fatalf("expected status entry for key %q", key)
@@ -113,7 +125,7 @@ func TestUpdateStatus(t *testing.T) {
 	}
 
 	// Second update: increments count.
-	a.UpdateStatus(key, "testdb", "job1", "test reason")
+	a.UpdateStatus(key, d)
 	st = a.status[key]
 	if st.SendCount != 2 {
 		t.Errorf("SendCount = %d, want 2", st.SendCount)
@@ -159,42 +171,73 @@ func TestRemoveStale(t *testing.T) {
 
 func TestRemoveStale_LagSource(t *testing.T) {
 	a := &Alerter{
-		status:     make(map[string]*model.AlertStatus),
-		lagCleanup: make(map[string]bool),
+		status: make(map[string]*model.AlertStatus),
 	}
 
-	// Seed: lag-sourced entry marked for silent cleanup (lag below threshold).
+	// Seed: lag-sourced entry (job still running, lag below threshold).
 	a.status["db1:1"] = &model.AlertStatus{SendCount: 2, Source: "lag"}
-	a.lagCleanup["db1:1"] = true
 	// Seed: lag-sourced entry (job no longer running).
 	a.status["db1:2"] = &model.AlertStatus{SendCount: 1, Source: "lag"}
+	// Seed: lag-sourced entry (job transitioned to PAUSED).
+	a.status["db1:3"] = &model.AlertStatus{SendCount: 3, Source: "lag"}
 
 	dbJobs := map[string][]model.RoutineLoadJob{
 		"db1": {
-			{ID: 1, State: "RUNNING"}, // still running, lag below threshold
+			{ID: 1, State: "RUNNING"}, // still running
 			{ID: 2, State: "STOPPED"}, // no longer running
+			{ID: 3, State: "PAUSED"},  // transitioned from RUNNING to PAUSED
 		},
 	}
 
 	recovered := a.RemoveStale(dbJobs)
 
-	// db1:1 should be silently cleaned (lag below threshold, no recovery).
-	if _, ok := a.status["db1:1"]; ok {
-		t.Error("db1:1 should have been removed (lag below threshold)")
+	// db1:1 should remain (still running, backoff continues).
+	if _, ok := a.status["db1:1"]; !ok {
+		t.Error("db1:1 should still exist (still running)")
 	}
-	if _, ok := a.lagCleanup["db1:1"]; ok {
-		t.Error("db1:1 lagCleanup should have been cleared")
-	}
-	// db1:2 should be recovered (job no longer running).
+	// db1:2 should be silently removed (job no longer running).
 	if _, ok := a.status["db1:2"]; ok {
 		t.Error("db1:2 should have been removed (job stopped)")
 	}
-	// Only db1:2 should be in recovered list (db1:1 is silent cleanup).
-	if len(recovered) != 1 {
-		t.Errorf("recovered count = %d, want 1, got %v", len(recovered), recovered)
+	// db1:3 should remain (still monitored as PAUSED, backoff continues).
+	if _, ok := a.status["db1:3"]; !ok {
+		t.Error("db1:3 should still exist (transitioned to PAUSED)")
 	}
-	if len(recovered) > 0 && recovered[0] != "db1:2" {
-		t.Errorf("recovered[0] = %q, want %q", recovered[0], "db1:2")
+	// Lag-sourced entries also send recovery when job disappears from scan.
+	if len(recovered) != 1 {
+		t.Errorf("recovered count = %d, want 1", len(recovered))
+	}
+}
+
+func TestEvaluateOne_SourceUpdate(t *testing.T) {
+	cfg := &config.Config{
+		Alert: config.AlertConfig{
+			DefaultInitialInterval: config.Duration{5 * time.Minute},
+			DefaultMaxInterval:     config.Duration{60 * time.Minute},
+			DefaultBackoffFactor:   2.0,
+			ErrorURLTimeout:        config.Duration{5 * time.Second},
+			Lag:                    config.LagConfig{Enabled: true, Threshold: 10000},
+		},
+	}
+	a := &Alerter{
+		cfg:    cfg,
+		client: &http.Client{Timeout: 5 * time.Second},
+		status: make(map[string]*model.AlertStatus),
+	}
+
+	// First: job is RUNNING with lag → source should be "lag".
+	job := model.RoutineLoadJob{ID: 1, Name: "test", State: "RUNNING", Lag: `{"0":20000}`}
+	a.evaluateOne(context.Background(), "db1:1", "db1", job)
+	if a.status["db1:1"].Source != "lag" {
+		t.Errorf("source = %q, want %q", a.status["db1:1"].Source, "lag")
+	}
+
+	// Second: same job transitions to PAUSED → source stays "lag" (immutable once set).
+	job.State = "PAUSED"
+	job.ReasonOfStateChanged = "user paused"
+	a.evaluateOne(context.Background(), "db1:1", "db1", job)
+	if a.status["db1:1"].Source != "lag" {
+		t.Errorf("source = %q, want %q (source is immutable once set)", a.status["db1:1"].Source, "lag")
 	}
 }
 

@@ -9,7 +9,7 @@ import (
 	"strings"
 
 	"github.com/jimmy-boss/alert_routine_load/model"
-	glog "github.com/jimmy-boss/go-log/glog"
+	"github.com/jimmy-boss/go-log/glog"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
