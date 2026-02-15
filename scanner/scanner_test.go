@@ -19,9 +19,9 @@ func TestPick(t *testing.T) {
 		{[]string{"name"}, "test_job_lower"},
 		{[]string{"State"}, "PAUSED"},
 		{[]string{"Missing"}, ""},
-		{[]string{"Missing", "Name"}, "test_job"},       // fallback to second key
-		{[]string{"Missing", "Missing2"}, ""},           // all missing
-		{[]string{"Name", "name"}, "test_job"},          // first match wins
+		{[]string{"Missing", "Name"}, "test_job"},
+		{[]string{"Missing", "Missing2"}, ""},
+		{[]string{"Name", "name"}, "test_job"},
 	}
 	for _, tt := range tests {
 		got := pick(m, tt.keys...)
@@ -94,7 +94,6 @@ func TestParseJob_Normal(t *testing.T) {
 }
 
 func TestParseJob_AlternativeColumnNames(t *testing.T) {
-	// Doris versions may use different column names.
 	m := map[string]string{
 		"id":                       "99",
 		"name":                     "alt_job",
@@ -165,7 +164,6 @@ func TestParseJob_InvalidTaskNum(t *testing.T) {
 }
 
 func TestParseJob_JobIdColumn(t *testing.T) {
-	// Some Doris versions use "JobId" or "job_id" instead of "Id".
 	m := map[string]string{
 		"JobId": "555",
 		"Name":  "jobid_test",
@@ -178,7 +176,6 @@ func TestParseJob_JobIdColumn(t *testing.T) {
 }
 
 func TestParseJob_ReasonFallback(t *testing.T) {
-	// "Message" as fallback for ReasonOfStateChanged.
 	m := map[string]string{
 		"Name":    "msg_test",
 		"Message": "fallback reason",

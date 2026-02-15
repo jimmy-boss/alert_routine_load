@@ -1,8 +1,6 @@
-// Command doris-alert is a Routine Load alert daemon for Apache Doris.
-//
-// Usage:
-//
-//	doris-alert -c config.yaml
+// @Author: Jimmy
+// @DateTime: 2026/02/15
+
 package main
 
 import (
@@ -11,292 +9,305 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
-	"github.com/jimmy-boss/alert_routine_load/alerter"
-	"github.com/jimmy-boss/alert_routine_load/config"
-	"github.com/jimmy-boss/alert_routine_load/notifier"
-	"github.com/jimmy-boss/alert_routine_load/scanner"
-	glog "github.com/jimmy-boss/go-log/glog"
+	"github.com/jimmy-boss/alert_routine_load/v2/config"
+	"github.com/jimmy-boss/alert_routine_load/v2/evaluator"
+	"github.com/jimmy-boss/alert_routine_load/v2/model"
+	"github.com/jimmy-boss/alert_routine_load/v2/notifier"
+	"github.com/jimmy-boss/alert_routine_load/v2/scanner"
+	"github.com/jimmy-boss/alert_routine_load/v2/store"
+	"github.com/jimmy-boss/go-log/glog"
 	"go.uber.org/zap"
-
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
+	gormlogger "gorm.io/gorm/logger"
 )
 
+var (
+	configPath string
+	interval   time.Duration
+	dataDir    string
+)
+
+func init() {
+	flag.StringVar(&configPath, "c", "conf/config.yaml", "配置文件路径")
+	flag.DurationVar(&interval, "interval", 60*time.Second, "扫描间隔")
+	flag.StringVar(&dataDir, "data", "./data", "数据持久化目录")
+}
+
 func main() {
-	cfgPath := flag.String("c", "conf/alert.yaml", "path to config file")
 	flag.Parse()
 
-	// Logger.
-	log, err := glog.NewZapLogger(glog.LoggerConfig{
+	// 初始化 logger
+	glog.InitLogger("default", glog.LoggerConfig{
 		Level:      "info",
 		OutputPath: []string{"stdout"},
 		Encoder:    "console",
 	})
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "init logger: %v\n", err)
-		os.Exit(1)
-	}
-	defer log.Close()
+	log := glog.GlobalLoggers["default"]
 
-	// Load config.
-	cfg, err := config.Load(*cfgPath)
+	// 加载配置
+	cfg, err := config.Load(configPath)
 	if err != nil {
-		log.Error("load config failed", zap.Error(err))
-		os.Exit(1)
+		log.Fatal("加载配置失败", zap.Error(err))
 	}
-	log.Info("config loaded",
-		zap.Int("databases", len(cfg.Database)),
-		zap.Duration("scan_interval", cfg.Alert.ScanInterval.Duration),
-		zap.Bool("history_enabled", cfg.Alert.History.Enabled),
+
+	// 连接 Doris
+	db, err := connectDoris(cfg, log)
+	if err != nil {
+		log.Fatal("连接 Doris 失败", zap.Error(err))
+	}
+
+	// 初始化 store
+	statusStore, err := store.NewStatusStore(dataDir, store.WithStatusLogger(log))
+	if err != nil {
+		log.Fatal("初始化 StatusStore 失败", zap.Error(err))
+	}
+
+	archiveStore, err := store.NewArchiveStore(dataDir,
+		store.WithArchiveLogger(log),
+		store.WithRetentionDays(cfg.Alert.History.RetentionDays),
+	)
+	if err != nil {
+		log.Fatal("初始化 ArchiveStore 失败", zap.Error(err))
+	}
+
+	// 初始化组件
+	sc := scanner.New(db, scanner.WithLogger(log))
+	eval := evaluator.New(cfg, statusStore, evaluator.WithLogger(log))
+	nt := createNotifier(cfg, log)
+
+	// 优雅关闭
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		sig := <-sigCh
+		log.Info("收到关闭信号，准备退出", zap.String("signal", sig.String()))
+		cancel()
+	}()
+
+	// 构建数据库列表
+	databases, err := buildDatabaseList(ctx, cfg, sc)
+	if err != nil {
+		log.Fatal("构建数据库列表失败", zap.Error(err))
+	}
+
+	log.Info("启动 Doris Routine Load 告警系统",
+		zap.Int("databases", len(databases)),
+		zap.Duration("interval", interval),
+		zap.String("channel", cfg.Notify.Channel),
 	)
 
-	// Standalone mode: doris connection info is required.
-	if cfg.Doris.Host == "" {
-		log.Error("doris.host is required in standalone mode")
-		os.Exit(1)
+	// 主循环
+	run(ctx, cfg, sc, eval, nt, statusStore, archiveStore, databases, log)
+
+	// 持久化
+	if err := statusStore.Save(); err != nil {
+		log.Error("保存 StatusStore 失败", zap.Error(err))
+	}
+	if err := archiveStore.Save(); err != nil {
+		log.Error("保存 ArchiveStore 失败", zap.Error(err))
 	}
 
-	// Connect to Doris via GORM.
+	log.Info("告警系统已退出")
+}
+
+// connectDoris 创建 Doris GORM 连接。
+func connectDoris(cfg *config.Config, log glog.HLogger) (*gorm.DB, error) {
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/?charset=utf8mb4&parseTime=True&loc=Local",
 		cfg.Doris.User, cfg.Doris.Password, cfg.Doris.Host, cfg.Doris.Port)
+
+	gormLog := glog.NewGormLogger(log, &gormlogger.Config{
+		SlowThreshold: 500 * time.Millisecond,
+		LogLevel:      gormlogger.Warn,
+	})
+
 	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Silent),
+		Logger: gormLog,
 	})
 	if err != nil {
-		log.Error("open db failed", zap.Error(err))
-		os.Exit(1)
+		return nil, fmt.Errorf("打开数据库连接失败: %w", err)
 	}
 
 	sqlDB, err := db.DB()
 	if err != nil {
-		log.Error("get underlying sql.DB failed", zap.Error(err))
-		os.Exit(1)
+		return nil, fmt.Errorf("获取底层连接失败: %w", err)
 	}
+	sqlDB.SetMaxIdleConns(2)
 	sqlDB.SetMaxOpenConns(5)
-	sqlDB.SetConnMaxLifetime(5 * time.Minute)
-	defer sqlDB.Close()
+	sqlDB.SetConnMaxLifetime(30 * time.Minute)
 
-	log.Info("connected to doris",
-		zap.String("host", cfg.Doris.Host),
-		zap.Int("port", cfg.Doris.Port),
-	)
+	return db, nil
+}
 
-	// Build alert history (optional).
-	var history *alerter.AlertHistory
-	if cfg.Alert.History.Enabled {
-		history, err = alerter.NewHistory(&cfg.Alert.History,
-			alerter.WithHistoryLogger(log),
-		)
-		if err != nil {
-			log.Error("init alert history failed", zap.Error(err))
-			os.Exit(1)
-		}
-	}
-
-	// Build components.
-	scan := scanner.New(db, scanner.WithLogger(log))
-	alert := alerter.New(cfg, alerter.WithLogger(log), alerter.WithHistory(history))
-	notify := notifier.New(&cfg.Feishu, notifier.WithLogger(log))
-
-	// Graceful shutdown.
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigCh
-		log.Info("shutting down...")
-		if history != nil {
-			history.Save()
-		}
-		cancel()
-	}()
-
-	// Periodic history flush (every 5 minutes).
-	if history != nil {
-		go func() {
-			ticker := time.NewTicker(5 * time.Minute)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					history.Save()
-				}
-			}
-		}()
-	}
-
-	// Build database list and job filter.
-	databases, jobFilter, err := buildDatabaseList(ctx, cfg, scan, log)
-	if err != nil {
-		log.Error("build database list failed", zap.Error(err))
+// createNotifier 根据配置创建通知器。
+func createNotifier(cfg *config.Config, log glog.HLoggerBase) notifier.Notifier {
+	switch cfg.Notify.Channel {
+	case "feishu":
+		return notifier.NewFeishu(&cfg.Notify.Feishu, notifier.WithFeishuLogger(log))
+	default:
+		log.Error("不支持的通知渠道", zap.String("channel", cfg.Notify.Channel))
 		os.Exit(1)
+		return nil
 	}
-	log.Info("monitoring databases", zap.Int("count", len(databases)))
+}
 
-	// Main loop.
-	ticker := time.NewTicker(cfg.Alert.ScanInterval.Duration)
+// buildDatabaseList 获取并过滤数据库列表。
+func buildDatabaseList(ctx context.Context, cfg *config.Config, sc *scanner.Scanner) ([]string, error) {
+	databases, err := sc.ShowDatabases(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return cfg.FilterDatabases(databases), nil
+}
+
+// run 主循环：扫描 → 评估 → 通知 → 归档 → 持久化。
+func run(
+	ctx context.Context,
+	cfg *config.Config,
+	sc *scanner.Scanner,
+	eval *evaluator.Evaluator,
+	nt notifier.Notifier,
+	statusStore *store.StatusStore,
+	archiveStore *store.ArchiveStore,
+	databases []string,
+	log glog.HLoggerBase,
+) {
+	jobFilter := buildJobFilter(cfg)
+
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
-	// Run once immediately.
-	runWithTimeout(ctx, cfg.Alert.ScanInterval.Duration, scan, alert, notify, history, databases, jobFilter, log)
+	// 首次立即执行
+	cycle(ctx, cfg, sc, eval, nt, statusStore, archiveStore, databases, jobFilter, log)
 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Info("stopped")
 			return
 		case <-ticker.C:
-			runWithTimeout(ctx, cfg.Alert.ScanInterval.Duration, scan, alert, notify, history, databases, jobFilter, log)
+			cycle(ctx, cfg, sc, eval, nt, statusStore, archiveStore, databases, jobFilter, log)
 		}
 	}
 }
 
-// runWithTimeout wraps run() with a timeout context to prevent indefinite blocking.
-func runWithTimeout(ctx context.Context, timeout time.Duration, scan *scanner.Scanner, alert *alerter.Alerter, notify *notifier.Notifier, history *alerter.AlertHistory, databases []string, jobFilter map[string][]string, log glog.HLogger) {
-	runCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	run(runCtx, scan, alert, notify, history, databases, jobFilter, log)
-}
-
-func run(ctx context.Context, scan *scanner.Scanner, alert *alerter.Alerter, notify *notifier.Notifier, history *alerter.AlertHistory, databases []string, jobFilter map[string][]string, log glog.HLogger) {
-	log.Info("scanning routine load jobs...")
-
-	dbJobs, err := scan.QueryAllDatabases(ctx, databases, jobFilter)
+// cycle 执行一次完整的告警周期。
+func cycle(
+	ctx context.Context,
+	cfg *config.Config,
+	sc *scanner.Scanner,
+	eval *evaluator.Evaluator,
+	nt notifier.Notifier,
+	statusStore *store.StatusStore,
+	archiveStore *store.ArchiveStore,
+	databases []string,
+	jobFilter map[string][]string,
+	log glog.HLoggerBase,
+) {
+	// 1. 扫描所有数据库的 routine load 任务
+	dbJobs, err := sc.QueryAllDatabases(ctx, databases, jobFilter)
 	if err != nil {
-		log.Error("scan failed", zap.Error(err))
+		log.Error("扫描任务失败", zap.Error(err))
 		return
 	}
 
 	totalJobs := 0
-	pausedJobs := 0
 	for _, jobs := range dbJobs {
 		totalJobs += len(jobs)
-		for _, j := range jobs {
-			if strings.ToUpper(j.State) == "PAUSED" || strings.ToUpper(j.State) == "PAUSE" {
-				pausedJobs++
-			}
+	}
+	log.Info("扫描完成", zap.Int("databases", len(dbJobs)), zap.Int("jobs", totalJobs))
+
+	// 2. Reconcile：状态流转
+	eval.Reconcile(dbJobs)
+
+	// 3. 收集恢复中的条目并发送恢复通知
+	recovered := statusStore.CollectRecovering()
+	for _, st := range recovered {
+		info := model.RecoveryInfo{
+			JobKey:      st.JobKey,
+			JobName:     st.JobName,
+			Database:    st.Database,
+			Source:      st.Source,
+			RecoveredAt: st.RecoveredAt,
+			Duration:    st.RecoveredAt.Sub(st.FirstAlertAt),
+			SendCount:   st.SendCount,
+		}
+		if err := nt.SendRecovery(info); err != nil {
+			log.Error("发送恢复通知失败",
+				zap.String("job_key", st.JobKey),
+				zap.Error(err),
+			)
+		} else {
+			log.Info("恢复通知已发送",
+				zap.String("job_key", st.JobKey),
+				zap.Duration("duration", info.Duration),
+			)
 		}
 	}
-	log.Info("scan complete",
-		zap.Int("total_jobs", totalJobs),
-		zap.Int("paused_jobs", pausedJobs),
-	)
 
-	decisions := alert.Evaluate(ctx, dbJobs)
+	// 4. 移除已恢复条目（必须在 Evaluate 之前，避免 Evaluate 拿到旧 status 重复发送）
+	statusStore.RemoveRecovered()
 
-	sent := 0
-	skipped := 0
+	// 5. Evaluate：评估告警决策
+	decisions := eval.Evaluate(ctx, dbJobs)
+
+	// 6. 发送告警
 	for _, d := range decisions {
-		if d.Action == "skip" {
-			skipped++
-			log.Debug("alert skipped",
-				zap.Int64("job_id", d.Event.JobID),
-				zap.String("reason", d.Reason),
-			)
+		if d.Action != "send" {
 			continue
 		}
-		if err := notify.Send(d); err != nil {
-			log.Error("send alert failed",
+		if err := nt.Send(d.Event); err != nil {
+			log.Error("发送告警失败",
 				zap.Int64("job_id", d.Event.JobID),
+				zap.String("job_name", d.Event.JobName),
 				zap.Error(err),
 			)
 			continue
 		}
-		// Update status only after successful send.
-		alert.UpdateStatus(d.StatusKey, &d)
-		sent++
+		eval.UpdateAfterSend(d.Key)
+		log.Info("告警已发送",
+			zap.Int64("job_id", d.Event.JobID),
+			zap.String("job_name", d.Event.JobName),
+			zap.String("database", d.Event.Database),
+		)
 	}
 
-	// Flush history after alert loop (before recovery, in case of timeout).
-	if history != nil && sent > 0 {
-		history.Save()
+	// 7. 归档
+	for _, st := range recovered {
+		archiveStore.Archive(st)
 	}
 
-	// Clean up status for recovered jobs and send recovery notifications.
-	recoveredKeys := alert.RemoveStale(dbJobs)
-	recovered := 0
-	notified := 0
-	for _, key := range recoveredKeys {
-		// Extract database name from key (format: "db:jobId").
-		dbName := ""
-		if idx := strings.Index(key, ":"); idx > 0 {
-			dbName = key[:idx]
-		}
-		var duration time.Duration
-		var sendCount int
-		var jobName string
-		if history != nil {
-			if record := history.FindArchivedRecord(key); record != nil {
-				duration = record.Duration()
-				sendCount = record.SendCount
-				jobName = record.JobName
-			}
-		}
-		// Only send recovery notification if alerts were actually sent.
-		if sendCount > 0 {
-			if err := notify.SendRecovery(key, dbName, jobName, duration, sendCount); err != nil {
-				log.Error("send recovery notification failed",
-					zap.String("job_key", key),
-					zap.Error(err),
-				)
-			}
-			notified++
-		}
-		recovered++
+	// 8. 持久化
+	if err := statusStore.Save(); err != nil {
+		log.Error("保存 StatusStore 失败", zap.Error(err))
 	}
-
-	// Flush history once at end of cycle (not per-alert).
-	if history != nil {
-		history.Save()
+	if err := archiveStore.Save(); err != nil {
+		log.Error("保存 ArchiveStore 失败", zap.Error(err))
 	}
-
-	log.Info("alert cycle done",
-		zap.Int("sent", sent),
-		zap.Int("skipped", skipped),
-		zap.Int("recovered", recovered),
-		zap.Int("recovery_notified", notified),
-	)
 }
 
-// buildDatabaseList builds the list of databases to monitor and the job filter
-// based on the scan_databases mode.
-func buildDatabaseList(ctx context.Context, cfg *config.Config, scan *scanner.Scanner, log glog.HLogger) ([]string, map[string][]string, error) {
-	var databases []string
-
-	switch cfg.ScanDatabases.Mode {
-	case "all":
-		allDBs, err := scan.ShowDatabases(ctx)
-		if err != nil {
-			return nil, nil, fmt.Errorf("show databases: %w", err)
+// buildJobFilter 从配置中构建数据库→任务名过滤器。
+func buildJobFilter(cfg *config.Config) map[string][]string {
+	filter := make(map[string][]string)
+	for _, db := range cfg.Database {
+		if len(db.Jobs) == 0 {
+			continue
 		}
-		databases = cfg.FilterDatabases(allDBs)
-		log.Info("auto-discovered databases",
-			zap.Int("total", len(allDBs)),
-			zap.Int("after_filter", len(databases)),
-		)
-	default: // "configured"
-		for _, dbRule := range cfg.Database {
-			databases = append(databases, dbRule.Database)
-		}
-	}
-
-	// Build job filter from database section (works for both modes).
-	jobFilter := make(map[string][]string)
-	for _, dbRule := range cfg.Database {
-		for _, j := range dbRule.Jobs {
-			if j.Name != "" {
-				jobFilter[dbRule.Database] = append(jobFilter[dbRule.Database], j.Name)
+		names := make([]string, 0, len(db.Jobs))
+		for _, job := range db.Jobs {
+			if job.Name != "" {
+				names = append(names, job.Name)
 			}
 		}
+		if len(names) > 0 {
+			filter[db.Name] = names
+		}
 	}
-
-	return databases, jobFilter, nil
+	return filter
 }

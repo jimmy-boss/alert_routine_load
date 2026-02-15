@@ -1,4 +1,7 @@
-// Package config loads and validates alert.yaml.
+// @Author: Jimmy
+// @DateTime: 2026/02/15
+
+// Package config 提供 YAML 配置加载与三层覆盖逻辑。
 package config
 
 import (
@@ -10,62 +13,43 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Duration is a time.Duration that supports human-readable YAML values
-// like "5m", "30s", "1h30m", as well as raw nanosecond integers for backward compatibility.
+// Duration 支持 "5m" 格式的 YAML 时间解析。
 type Duration struct {
 	time.Duration
 }
 
-func (d *Duration) UnmarshalYAML(node *yaml.Node) error {
-	// Try parsing as a human-readable string first (e.g. "5m", "30s").
+// UnmarshalYAML 实现 yaml.Unmarshaler 接口。
+func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 	var s string
-	if err := node.Decode(&s); err == nil {
-		parsed, err := time.ParseDuration(s)
-		if err != nil {
-			return fmt.Errorf("invalid duration %q: %w", s, err)
-		}
-		d.Duration = parsed
-		return nil
+	if err := value.Decode(&s); err != nil {
+		return err
 	}
-
-	// Fallback: try parsing as a raw integer (nanoseconds).
-	var raw int64
-	if err := node.Decode(&raw); err != nil {
-		return fmt.Errorf("cannot parse duration: expected string like \"5m\" or integer nanoseconds")
+	parsed, err := time.ParseDuration(s)
+	if err != nil {
+		return fmt.Errorf("解析 Duration 失败: %w", err)
 	}
-	d.Duration = time.Duration(raw)
+	d.Duration = parsed
 	return nil
 }
 
-func (d Duration) MarshalYAML() (interface{}, error) {
-	return d.Duration.String(), nil
-}
-
-// DefaultSystemDBs is the built-in list of Doris system databases that are
-// always excluded in blacklist (scan_databases.mode=all) mode.
+// DefaultSystemDBs 默认的系统数据库列表，扫描时跳过。
 var DefaultSystemDBs = []string{
 	"information_schema",
-	"__internal_schema",
 	"mysql",
+	"_statistics_",
+	"doris_audit_db__",
 }
 
-// ScanDatabasesConfig controls how databases are discovered for monitoring.
-type ScanDatabasesConfig struct {
-	Mode              string   `yaml:"mode"`                     // "all" = auto-discover | "configured" = only database section (default)
-	Exclude           []string `yaml:"exclude"`                  // exact-match exclusions
-	ExcludePatterns   []string `yaml:"exclude_patterns"`         // regex exclusions
-	OverrideSystemDBs []string `yaml:"override_system_databases"` // additional system DBs to exclude
-}
-
-// Config is the top-level configuration.
+// Config 是顶层配置结构体。
 type Config struct {
-	Doris          DorisConfig          `yaml:"doris"`
-	Feishu         FeishuConfig         `yaml:"feishu"`
-	Alert          AlertConfig          `yaml:"alert"`
-	ScanDatabases  ScanDatabasesConfig  `yaml:"scan_databases"`
-	Database       []DatabaseRule       `yaml:"database"`
+	Doris         DorisConfig         `yaml:"doris"`
+	Notify        NotifyConfig        `yaml:"notify"`
+	Alert         AlertConfig         `yaml:"alert"`
+	ScanDatabases ScanDatabasesConfig `yaml:"scan_databases"`
+	Database      []DatabaseRule      `yaml:"database"`
 }
 
+// DorisConfig Doris 连接配置。
 type DorisConfig struct {
 	Host     string `yaml:"host"`
 	Port     int    `yaml:"port"`
@@ -73,118 +57,112 @@ type DorisConfig struct {
 	Password string `yaml:"password"`
 }
 
+// NotifyConfig 通知配置，支持多渠道。
+type NotifyConfig struct {
+	Channel  string         `yaml:"channel"`
+	Feishu   FeishuConfig   `yaml:"feishu"`
+	Dingtalk DingtalkConfig `yaml:"dingtalk"`
+}
+
+// FeishuConfig 飞书通知配置。
 type FeishuConfig struct {
 	WebhookURL string `yaml:"webhook_url"`
-	SignSecret string `yaml:"sign_secret"` // optional: for signed webhook
+	SignSecret string `yaml:"sign_secret"`
 }
 
+// DingtalkConfig 钉钉通知配置。
+type DingtalkConfig struct {
+	WebhookURL string `yaml:"webhook_url"`
+}
+
+// AlertConfig 告警全局配置。
 type AlertConfig struct {
-	// How often the scanner loop runs.
-	ScanInterval Duration `yaml:"scan_interval"`
-	// Global defaults for alert sending.
-	DefaultInitialInterval Duration  `yaml:"default_initial_interval"`
-	DefaultMaxInterval     Duration  `yaml:"default_max_interval"`
-	DefaultBackoffFactor   float64   `yaml:"default_backoff_factor"`
-	// Error message truncation length (runes).
-	ErrorTruncateLen int `yaml:"error_truncate_len"`
-	// Whether to fetch error URLs for detail.
-	FetchErrorURL bool `yaml:"fetch_error_url"`
-	// HTTP timeout for fetching error URLs.
-	ErrorURLTimeout Duration `yaml:"error_url_timeout"`
-	// Alert history persistence.
+	Lag     LagConfig     `yaml:"lag"`
 	History HistoryConfig `yaml:"history"`
-	// Lag alert configuration.
-	Lag LagConfig `yaml:"lag"`
 }
 
-// HistoryConfig controls alert history persistence.
-type HistoryConfig struct {
-	Enabled bool     `yaml:"enabled"` // default true
-	Dir     string   `yaml:"dir"`     // persistence directory, default "data"
-	MaxAge  Duration `yaml:"max_age"` // how long to keep archived records, default 720h (30d)
-}
-
-// LagConfig controls lag-based alerting (data consumption delay).
+// LagConfig 延迟告警配置。
 type LagConfig struct {
-	Enabled   bool  `yaml:"enabled"`   // default false
-	Threshold int64 `yaml:"threshold"` // per-partition lag threshold, default 10000
+	Threshold     int64    `yaml:"threshold"`
+	Recovery      int64    `yaml:"recovery"`
+	AlertInterval Duration `yaml:"alert_interval"`
+	BackoffFactor float64  `yaml:"backoff_factor"`
+	MaxInterval   Duration `yaml:"max_interval"`
+	MaxSendCount  int      `yaml:"max_send_count"`
 }
 
+// HistoryConfig 历史记录配置。
+type HistoryConfig struct {
+	RetentionDays int `yaml:"retention_days"`
+}
+
+// ScanDatabasesConfig 扫描数据库配置。
+type ScanDatabasesConfig struct {
+	Exclude         []string `yaml:"exclude"`
+	ExcludePatterns []string `yaml:"exclude_patterns"`
+}
+
+// DatabaseRule 数据库级规则。
 type DatabaseRule struct {
-	Database string          `yaml:"database"`
-	Jobs     []JobRule       `yaml:"jobs,omitempty"` // optional per-job overrides; empty = all jobs
-	Alert    *AlertOverride  `yaml:"alert,omitempty"` // database-level overrides
+	Name string    `yaml:"name"`
+	Jobs []JobRule `yaml:"jobs"`
 }
 
+// JobRule Job 级规则。
 type JobRule struct {
-	Name   string         `yaml:"name"`
-	Alert  *AlertOverride `yaml:"alert,omitempty"`
+	Name  string        `yaml:"name"`
+	Alert AlertOverride `yaml:"alert"`
 }
 
-// AlertOverride allows per-database / per-job override of timing.
+// AlertOverride 告警覆盖配置。
 type AlertOverride struct {
-	InitialInterval *Duration    `yaml:"initial_interval,omitempty"`
-	MaxInterval     *Duration    `yaml:"max_interval,omitempty"`
-	BackoffFactor   *float64     `yaml:"backoff_factor,omitempty"`
-	Lag             *LagOverride `yaml:"lag,omitempty"`
+	Lag LagOverride `yaml:"lag"`
 }
 
-// LagOverride allows per-database / per-job override of lag alert config.
+// LagOverride 延迟覆盖配置。
 type LagOverride struct {
-	Enabled   *bool  `yaml:"enabled,omitempty"`
-	Threshold *int64 `yaml:"threshold,omitempty"`
+	Threshold *int64 `yaml:"threshold"`
+	Recovery  *int64 `yaml:"recovery"`
 }
 
-// Load reads and parses the config file (standalone mode, top-level keys).
+// Load 从 YAML 文件加载配置（顶层模式）。
 func Load(path string) (*Config, error) {
-	raw, err := os.ReadFile(path)
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read config: %w", err)
+		return nil, fmt.Errorf("读取配置文件失败: %w", err)
 	}
-	c := &Config{}
-	if err := yaml.Unmarshal(raw, c); err != nil {
-		return nil, fmt.Errorf("parse config: %w", err)
-	}
-	applyDefaults(c)
-	if err := validate(c); err != nil {
-		return nil, err
-	}
-	return c, nil
+	return LoadFromBytes(data, "")
 }
 
-// LoadFromYAML extracts a namespaced sub-config from a host application's YAML.
-// Use this when embedding as a library to avoid top-level key conflicts.
+// LoadFromBytes 从 YAML 字节流加载配置。
+// namespace 为空时按顶层解析；非空时从宿主 YAML 中提取指定 key 的子树解析。
 //
-// Example host config:
+// 宿主 YAML 示例：
 //
 //	server:
 //	  port: 8080
-//	doris_alert:           ← namespace
+//	doris_alert:            ← namespace
 //	  doris:
 //	    host: "127.0.0.1"
-//	  alert:
-//	    scan_interval: "60s"
+//	  notify:
+//	    channel: feishu
 //
-// Usage: cfg, err := config.LoadFromYAML(hostYAML, "doris_alert")
-func LoadFromYAML(data []byte, namespace string) (*Config, error) {
+// 调用方式：cfg, err := config.LoadFromBytes(hostYAML, "doris_alert")
+func LoadFromBytes(data []byte, namespace string) (*Config, error) {
 	if namespace == "" {
-		// No namespace: parse as top-level (same as Load).
-		c := &Config{}
-		if err := yaml.Unmarshal(data, c); err != nil {
-			return nil, fmt.Errorf("parse config: %w", err)
+		var cfg Config
+		if err := yaml.Unmarshal(data, &cfg); err != nil {
+			return nil, fmt.Errorf("解析配置失败: %w", err)
 		}
-		return finalize(c)
+		return finalize(&cfg)
 	}
 
-	// Parse into a generic map to find the namespace node.
 	var root yaml.Node
 	if err := yaml.Unmarshal(data, &root); err != nil {
-		return nil, fmt.Errorf("parse yaml: %w", err)
+		return nil, fmt.Errorf("解析 YAML 失败: %w", err)
 	}
-
-	// Find the namespace key in the mapping node.
-	if root.Kind != yaml.DocumentNode || root.Content[0].Kind != yaml.MappingNode {
-		return nil, fmt.Errorf("yaml is not a mapping document")
+	if root.Kind != yaml.DocumentNode || len(root.Content) == 0 || root.Content[0].Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("YAML 不是 mapping 文档")
 	}
 
 	mapNode := root.Content[0]
@@ -196,207 +174,148 @@ func LoadFromYAML(data []byte, namespace string) (*Config, error) {
 		}
 	}
 	if nsNode == nil {
-		return nil, fmt.Errorf("namespace %q not found in yaml", namespace)
+		return nil, fmt.Errorf("命名空间 %q 未找到", namespace)
 	}
 
-	c := &Config{}
-	if err := nsNode.Decode(c); err != nil {
-		return nil, fmt.Errorf("decode namespace %q: %w", namespace, err)
+	var cfg Config
+	if err := nsNode.Decode(&cfg); err != nil {
+		return nil, fmt.Errorf("解码命名空间 %q 失败: %w", namespace, err)
 	}
-
-	return finalize(c)
+	return finalize(&cfg)
 }
 
-func finalize(c *Config) (*Config, error) {
-	applyDefaults(c)
-	if err := validate(c); err != nil {
-		return nil, err
+func finalize(cfg *Config) (*Config, error) {
+	applyDefaults(cfg)
+	if err := validate(cfg); err != nil {
+		return nil, fmt.Errorf("配置校验失败: %w", err)
 	}
-	return c, nil
+	return cfg, nil
 }
 
-func applyDefaults(c *Config) {
-	if c.ScanDatabases.Mode == "" {
-		c.ScanDatabases.Mode = "configured"
+// applyDefaults 设置默认值。
+func applyDefaults(cfg *Config) {
+	if cfg.Notify.Channel == "" {
+		cfg.Notify.Channel = "feishu"
 	}
-	if c.Doris.Port == 0 {
-		c.Doris.Port = 9030
+	if cfg.Alert.Lag.AlertInterval.Duration == 0 {
+		cfg.Alert.Lag.AlertInterval = Duration{5 * time.Minute}
 	}
-	if c.Alert.ScanInterval.Duration == 0 {
-		c.Alert.ScanInterval.Duration = 60 * time.Second
+	if cfg.Alert.Lag.BackoffFactor == 0 {
+		cfg.Alert.Lag.BackoffFactor = 1.5
 	}
-	if c.Alert.DefaultInitialInterval.Duration == 0 {
-		c.Alert.DefaultInitialInterval.Duration = 5 * time.Minute
+	if cfg.Alert.Lag.MaxInterval.Duration == 0 {
+		cfg.Alert.Lag.MaxInterval = Duration{1 * time.Hour}
 	}
-	if c.Alert.DefaultMaxInterval.Duration == 0 {
-		c.Alert.DefaultMaxInterval.Duration = 60 * time.Minute
+	if cfg.Alert.Lag.MaxSendCount == 0 {
+		cfg.Alert.Lag.MaxSendCount = 10
 	}
-	if c.Alert.DefaultBackoffFactor == 0 {
-		c.Alert.DefaultBackoffFactor = 2.0
+	if cfg.Alert.History.RetentionDays == 0 {
+		cfg.Alert.History.RetentionDays = 7
 	}
-	if c.Alert.ErrorTruncateLen <= 0 {
-		c.Alert.ErrorTruncateLen = 300
-	}
-	if c.Alert.ErrorURLTimeout.Duration == 0 {
-		c.Alert.ErrorURLTimeout.Duration = 5 * time.Second
-	}
-	if c.Alert.History.Dir == "" {
-		c.Alert.History.Dir = "data"
-	}
-	if c.Alert.History.MaxAge.Duration == 0 {
-		c.Alert.History.MaxAge.Duration = 720 * time.Hour // 30 days
-	}
-	if c.Alert.Lag.Threshold == 0 {
-		c.Alert.Lag.Threshold = 10000
+	if cfg.ScanDatabases.Exclude == nil {
+		cfg.ScanDatabases.Exclude = DefaultSystemDBs
 	}
 }
 
-func validate(c *Config) error {
-	// doris.host is optional: third-party callers can pass *gorm.DB directly.
-	if c.Feishu.WebhookURL == "" {
-		return fmt.Errorf("feishu.webhook_url is required")
-	}
-
-	// Validate scan_databases mode.
-	switch c.ScanDatabases.Mode {
-	case "configured":
-		if len(c.Database) == 0 {
-			return fmt.Errorf("at least one database rule is required (mode=configured)")
+// validate 校验配置合法性。
+func validate(cfg *Config) error {
+	switch cfg.Notify.Channel {
+	case "feishu":
+		if cfg.Notify.Feishu.WebhookURL == "" {
+			return fmt.Errorf("notify.feishu.webhook_url 不能为空")
 		}
-	case "all":
-		// database section is optional in "all" mode
+	case "dingtalk":
+		if cfg.Notify.Dingtalk.WebhookURL == "" {
+			return fmt.Errorf("notify.dingtalk.webhook_url 不能为空")
+		}
 	default:
-		return fmt.Errorf("scan_databases.mode must be 'all' or 'configured', got %q", c.ScanDatabases.Mode)
+		return fmt.Errorf("不支持的通知渠道: %s，仅支持 feishu/dingtalk", cfg.Notify.Channel)
 	}
 
-	// Validate exclude_patterns are valid regexps.
-	for _, pattern := range c.ScanDatabases.ExcludePatterns {
-		if _, err := regexp.Compile(pattern); err != nil {
-			return fmt.Errorf("scan_databases.exclude_patterns: invalid regex %q: %w", pattern, err)
+	for _, p := range cfg.ScanDatabases.ExcludePatterns {
+		if _, err := regexp.Compile(p); err != nil {
+			return fmt.Errorf("exclude_patterns 正则无效 %q: %w", p, err)
 		}
 	}
 
-	for i, db := range c.Database {
-		if db.Database == "" {
-			return fmt.Errorf("database[%d].database is required", i)
-		}
-	}
 	return nil
 }
 
-// FilterDatabases filters a list of database names based on scan_databases config.
-// It removes: built-in system DBs, override_system_databases, exclude, and exclude_patterns.
-func (c *Config) FilterDatabases(allDBs []string) []string {
-	// Build exclusion set: DefaultSystemDBs ∪ OverrideSystemDBs ∪ Exclude
-	excludeSet := make(map[string]bool)
-	for _, db := range DefaultSystemDBs {
-		excludeSet[db] = true
-	}
-	for _, db := range c.ScanDatabases.OverrideSystemDBs {
-		excludeSet[db] = true
-	}
+// FilterDatabases 过滤掉排除列表中的数据库（支持精确匹配和正则匹配）。
+func (c *Config) FilterDatabases(databases []string) []string {
+	exclude := make(map[string]struct{}, len(c.ScanDatabases.Exclude))
 	for _, db := range c.ScanDatabases.Exclude {
-		excludeSet[db] = true
+		exclude[db] = struct{}{}
 	}
 
-	// Compile exclude patterns.
 	var patterns []*regexp.Regexp
 	for _, p := range c.ScanDatabases.ExcludePatterns {
-		re, _ := regexp.Compile(p) // already validated in validate()
+		re, err := regexp.Compile(p)
+		if err != nil {
+			continue
+		}
 		patterns = append(patterns, re)
 	}
 
 	var result []string
-	for _, db := range allDBs {
-		if excludeSet[db] {
+	for _, db := range databases {
+		if _, ok := exclude[db]; ok {
 			continue
 		}
-		excluded := false
+		matched := false
 		for _, re := range patterns {
 			if re.MatchString(db) {
-				excluded = true
+				matched = true
 				break
 			}
 		}
-		if excluded {
-			continue
+		if !matched {
+			result = append(result, db)
 		}
-		result = append(result, db)
 	}
 	return result
 }
 
-// GetEffective returns the resolved alert parameters for a given database + job name.
-// Priority: job-level > database-level > global default.
-func (c *Config) GetEffective(dbName, jobName string) (initialInterval, maxInterval time.Duration, backoffFactor float64) {
-	initialInterval = c.Alert.DefaultInitialInterval.Duration
-	maxInterval = c.Alert.DefaultMaxInterval.Duration
-	backoffFactor = c.Alert.DefaultBackoffFactor
-
-	for _, db := range c.Database {
-		if db.Database != dbName {
-			continue
-		}
-		// database-level override
-		if db.Alert != nil {
-			if db.Alert.InitialInterval != nil {
-				initialInterval = db.Alert.InitialInterval.Duration
-			}
-			if db.Alert.MaxInterval != nil {
-				maxInterval = db.Alert.MaxInterval.Duration
-			}
-			if db.Alert.BackoffFactor != nil {
-				backoffFactor = *db.Alert.BackoffFactor
-			}
-		}
-		// job-level override
-		for _, job := range db.Jobs {
-			if job.Name == jobName && job.Alert != nil {
-				if job.Alert.InitialInterval != nil {
-					initialInterval = job.Alert.InitialInterval.Duration
-				}
-				if job.Alert.MaxInterval != nil {
-					maxInterval = job.Alert.MaxInterval.Duration
-				}
-				if job.Alert.BackoffFactor != nil {
-					backoffFactor = *job.Alert.BackoffFactor
-				}
-			}
-		}
-	}
-	return
+// EffectiveLag 生效的延迟配置。
+type EffectiveLag struct {
+	Threshold int64
+	Recovery  int64
 }
 
-// GetEffectiveLag returns the resolved lag alert config for a given database + job name.
-// Priority: job-level > database-level > global default.
-func (c *Config) GetEffectiveLag(dbName, jobName string) (enabled bool, threshold int64) {
-	enabled = c.Alert.Lag.Enabled
-	threshold = c.Alert.Lag.Threshold
+// GetEffective 获取指定数据库和 Job 的生效配置。
+func (c *Config) GetEffective(database, jobName string) EffectiveLag {
+	lag := c.GetEffectiveLag(database, jobName)
+	return lag
+}
 
+// GetEffectiveLag 获取三层覆盖后的延迟阈值。
+// 优先级：job 级 > database 级 > 全局默认。
+func (c *Config) GetEffectiveLag(database, jobName string) EffectiveLag {
+	result := EffectiveLag{
+		Threshold: c.Alert.Lag.Threshold,
+		Recovery:  c.Alert.Lag.Recovery,
+	}
+
+	// database 级覆盖
 	for _, db := range c.Database {
-		if db.Database != dbName {
+		if db.Name != database {
 			continue
 		}
-		// database-level override
-		if db.Alert != nil && db.Alert.Lag != nil {
-			if db.Alert.Lag.Enabled != nil {
-				enabled = *db.Alert.Lag.Enabled
-			}
-			if db.Alert.Lag.Threshold != nil {
-				threshold = *db.Alert.Lag.Threshold
-			}
-		}
-		// job-level override
+		// job 级覆盖
 		for _, job := range db.Jobs {
-			if job.Name == jobName && job.Alert != nil && job.Alert.Lag != nil {
-				if job.Alert.Lag.Enabled != nil {
-					enabled = *job.Alert.Lag.Enabled
-				}
-				if job.Alert.Lag.Threshold != nil {
-					threshold = *job.Alert.Lag.Threshold
-				}
+			if job.Name != jobName {
+				continue
 			}
+			if job.Alert.Lag.Threshold != nil {
+				result.Threshold = *job.Alert.Lag.Threshold
+			}
+			if job.Alert.Lag.Recovery != nil {
+				result.Recovery = *job.Alert.Lag.Recovery
+			}
+			return result
 		}
+		return result
 	}
-	return
+
+	return result
 }

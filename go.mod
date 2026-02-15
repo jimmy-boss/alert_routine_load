@@ -1,4 +1,4 @@
-module github.com/jimmy-boss/alert_routine_load
+module github.com/jimmy-boss/alert_routine_load/v2
 
 go 1.23.6
 

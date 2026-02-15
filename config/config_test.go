@@ -1,194 +1,114 @@
+// @Author: Jimmy
+// @DateTime: 2026/02/15
+
 package config
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
-	"time"
 )
 
+func writeTempYAML(t *testing.T, content string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 func TestLoad_ValidConfig(t *testing.T) {
-	content := `
+	yaml := `
 doris:
   host: "127.0.0.1"
+  port: 9030
   user: "root"
-  password: "test"
-feishu:
-  webhook_url: "https://example.com/hook"
+  password: ""
+notify:
+  channel: "feishu"
+  feishu:
+    webhook_url: "https://open.feishu.cn/open-apis/bot/v2/hook/test"
 alert:
-  scan_interval: "30s"
-  default_initial_interval: "5m"
-  default_max_interval: "60m"
-  default_backoff_factor: 2.0
-  error_truncate_len: 500
-  fetch_error_url: true
-  error_url_timeout: "3s"
+  lag:
+    threshold: 10000
+    recovery: 5000
+    alert_interval: "5m"
+    max_send_count: 10
+  history:
+    retention_days: 7
+scan_databases:
+  exclude:
+    - "information_schema"
+    - "mysql"
 database:
-  - database: "test_db"
+  - name: "my_db"
     jobs:
-      - name: "job1"
+      - name: "my_job"
+        alert:
+          lag:
+            threshold: 20000
 `
-	path := writeTemp(t, content)
+	path := writeTempYAML(t, yaml)
 	cfg, err := Load(path)
 	if err != nil {
-		t.Fatalf("Load() error: %v", err)
+		t.Fatalf("Load 失败: %v", err)
 	}
 	if cfg.Doris.Host != "127.0.0.1" {
-		t.Errorf("host = %q, want %q", cfg.Doris.Host, "127.0.0.1")
+		t.Errorf("Doris.Host = %q, 期望 %q", cfg.Doris.Host, "127.0.0.1")
 	}
-	if cfg.Doris.Port != 9030 {
-		t.Errorf("port = %d, want 9030", cfg.Doris.Port)
+	if cfg.Notify.Channel != "feishu" {
+		t.Errorf("Notify.Channel = %q, 期望 %q", cfg.Notify.Channel, "feishu")
 	}
-	if cfg.Alert.ScanInterval.Duration != 30*time.Second {
-		t.Errorf("scan_interval = %v, want 30s", cfg.Alert.ScanInterval)
+	if cfg.Alert.Lag.Threshold != 10000 {
+		t.Errorf("Alert.Lag.Threshold = %d, 期望 10000", cfg.Alert.Lag.Threshold)
 	}
-	if cfg.Alert.ErrorTruncateLen != 500 {
-		t.Errorf("error_truncate_len = %d, want 500", cfg.Alert.ErrorTruncateLen)
+	if cfg.Alert.Lag.AlertInterval.Duration.Seconds() != 300 {
+		t.Errorf("Alert.Lag.AlertInterval = %v, 期望 5m", cfg.Alert.Lag.AlertInterval)
 	}
-}
-
-func TestLoad_Defaults(t *testing.T) {
-	content := `
-doris:
-  host: "127.0.0.1"
-feishu:
-  webhook_url: "https://example.com/hook"
-database:
-  - database: "db1"
-`
-	path := writeTemp(t, content)
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load() error: %v", err)
-	}
-	if cfg.Doris.Port != 9030 {
-		t.Errorf("default port = %d, want 9030", cfg.Doris.Port)
-	}
-	if cfg.Alert.ScanInterval.Duration != 60*time.Second {
-		t.Errorf("default scan_interval = %v, want 60s", cfg.Alert.ScanInterval)
-	}
-	if cfg.Alert.DefaultInitialInterval.Duration != 5*time.Minute {
-		t.Errorf("default initial_interval = %v, want 5m", cfg.Alert.DefaultInitialInterval)
-	}
-	if cfg.Alert.DefaultMaxInterval.Duration != 60*time.Minute {
-		t.Errorf("default max_interval = %v, want 60m", cfg.Alert.DefaultMaxInterval)
-	}
-	if cfg.Alert.DefaultBackoffFactor != 2.0 {
-		t.Errorf("default backoff_factor = %f, want 2.0", cfg.Alert.DefaultBackoffFactor)
-	}
-	if cfg.Alert.ErrorTruncateLen != 300 {
-		t.Errorf("default error_truncate_len = %d, want 300", cfg.Alert.ErrorTruncateLen)
-	}
-	if cfg.Alert.ErrorURLTimeout.Duration != 5*time.Second {
-		t.Errorf("default error_url_timeout = %v, want 5s", cfg.Alert.ErrorURLTimeout)
-	}
-}
-
-func TestLoad_MissingHost(t *testing.T) {
-	content := `
-feishu:
-  webhook_url: "https://example.com/hook"
-database:
-  - database: "db1"
-`
-	path := writeTemp(t, content)
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load() error: %v", err)
-	}
-	// doris.host is optional for library mode (caller passes *gorm.DB).
-	if cfg.Doris.Host != "" {
-		t.Errorf("host should be empty, got %q", cfg.Doris.Host)
+	if len(cfg.Database) != 1 {
+		t.Errorf("Database 长度 = %d, 期望 1", len(cfg.Database))
 	}
 }
 
 func TestLoad_MissingWebhookURL(t *testing.T) {
-	content := `
-doris:
-  host: "127.0.0.1"
-database:
-  - database: "db1"
+	yaml := `
+notify:
+  channel: "feishu"
 `
-	path := writeTemp(t, content)
+	path := writeTempYAML(t, yaml)
 	_, err := Load(path)
 	if err == nil {
-		t.Fatal("expected error for missing webhook_url")
+		t.Fatal("期望校验失败，但未报错")
+	}
+	if expected := "webhook_url"; !containsStr(err.Error(), expected) {
+		t.Errorf("错误信息 %q 应包含 %q", err.Error(), expected)
 	}
 }
 
-func TestLoad_MissingDatabase(t *testing.T) {
-	content := `
-doris:
-  host: "127.0.0.1"
-feishu:
-  webhook_url: "https://example.com/hook"
-database: []
-`
-	path := writeTemp(t, content)
-	_, err := Load(path)
-	if err == nil {
-		t.Fatal("expected error for empty database list")
-	}
-}
-
-func TestLoad_DatabaseEmptyName(t *testing.T) {
-	content := `
-doris:
-  host: "127.0.0.1"
-feishu:
-  webhook_url: "https://example.com/hook"
-database:
-  - database: ""
-`
-	path := writeTemp(t, content)
-	_, err := Load(path)
-	if err == nil {
-		t.Fatal("expected error for empty database name")
-	}
-}
-
-func TestDuration_UnmarshalYAML_HumanReadable(t *testing.T) {
-	content := `
-doris:
-  host: "127.0.0.1"
-feishu:
-  webhook_url: "https://example.com/hook"
-alert:
-  scan_interval: "2m30s"
-database:
-  - database: "db1"
-`
-	path := writeTemp(t, content)
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load() error: %v", err)
-	}
-	if cfg.Alert.ScanInterval.Duration != 2*time.Minute+30*time.Second {
-		t.Errorf("scan_interval = %v, want 2m30s", cfg.Alert.ScanInterval)
-	}
-}
-
-func TestGetEffective_ThreeLayerOverride(t *testing.T) {
-	globalInitial := 5 * time.Minute
-	dbInitial := 2 * time.Minute
-	jobInitial := 1 * time.Minute
+func TestGetEffectiveLag_ThreeLayerOverride(t *testing.T) {
+	globalThreshold := int64(10000)
+	globalRecovery := int64(5000)
+	jobThreshold := int64(30000)
 
 	cfg := &Config{
 		Alert: AlertConfig{
-			DefaultInitialInterval: Duration{globalInitial},
-			DefaultMaxInterval:     Duration{60 * time.Minute},
-			DefaultBackoffFactor:   2.0,
+			Lag: LagConfig{
+				Threshold: globalThreshold,
+				Recovery:  globalRecovery,
+			},
 		},
 		Database: []DatabaseRule{
 			{
-				Database: "db1",
-				Alert: &AlertOverride{
-					InitialInterval: &Duration{dbInitial},
-				},
+				Name: "my_db",
 				Jobs: []JobRule{
 					{
-						Name: "job1",
-						Alert: &AlertOverride{
-							InitialInterval: &Duration{jobInitial},
+						Name: "my_job",
+						Alert: AlertOverride{
+							Lag: LagOverride{
+								Threshold: &jobThreshold,
+							},
 						},
 					},
 				},
@@ -196,382 +116,152 @@ func TestGetEffective_ThreeLayerOverride(t *testing.T) {
 		},
 	}
 
-	// Test global default (non-existent database)
-	initial, _, _ := cfg.GetEffective("other_db", "other_job")
-	if initial != globalInitial {
-		t.Errorf("global: initial = %v, want %v", initial, globalInitial)
+	// 未匹配的 Job，使用全局默认
+	lag := cfg.GetEffectiveLag("other_db", "other_job")
+	if lag.Threshold != globalThreshold {
+		t.Errorf("未匹配: Threshold = %d, 期望 %d", lag.Threshold, globalThreshold)
+	}
+	if lag.Recovery != globalRecovery {
+		t.Errorf("未匹配: Recovery = %d, 期望 %d", lag.Recovery, globalRecovery)
 	}
 
-	// Test database-level override
-	initial, _, _ = cfg.GetEffective("db1", "other_job")
-	if initial != dbInitial {
-		t.Errorf("db-level: initial = %v, want %v", initial, dbInitial)
+	// 匹配 database 但未匹配 job，使用全局默认
+	lag = cfg.GetEffectiveLag("my_db", "unknown_job")
+	if lag.Threshold != globalThreshold {
+		t.Errorf("匹配 db 未匹配 job: Threshold = %d, 期望 %d", lag.Threshold, globalThreshold)
 	}
 
-	// Test job-level override (highest priority)
-	initial, _, _ = cfg.GetEffective("db1", "job1")
-	if initial != jobInitial {
-		t.Errorf("job-level: initial = %v, want %v", initial, jobInitial)
+	// 匹配 job，使用 job 级覆盖
+	lag = cfg.GetEffectiveLag("my_db", "my_job")
+	if lag.Threshold != jobThreshold {
+		t.Errorf("匹配 job: Threshold = %d, 期望 %d", lag.Threshold, jobThreshold)
+	}
+	if lag.Recovery != globalRecovery {
+		t.Errorf("匹配 job: Recovery = %d, 期望 %d", lag.Recovery, globalRecovery)
 	}
 }
 
-func TestLoadFromYAML_WithNamespace(t *testing.T) {
-	hostYAML := `
+func containsStr(s, substr string) bool {
+	return len(s) >= len(substr) && (s == substr || len(s) > 0 && containsSubstr(s, substr))
+}
+
+func containsSubstr(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
+}
+
+func TestLoadFromBytes_TopLevel(t *testing.T) {
+	data := []byte(`
+notify:
+  channel: "feishu"
+  feishu:
+    webhook_url: "https://example.com/hook"
+`)
+	cfg, err := LoadFromBytes(data, "")
+	if err != nil {
+		t.Fatalf("LoadFromBytes 空命名空间失败: %v", err)
+	}
+	if cfg.Notify.Channel != "feishu" {
+		t.Errorf("Channel = %q, 期望 feishu", cfg.Notify.Channel)
+	}
+}
+
+func TestLoadFromBytes_Namespace(t *testing.T) {
+	data := []byte(`
 server:
   port: 8080
-database:
-  host: "mysql://localhost"
 doris_alert:
   doris:
-    host: "127.0.0.1"
+    host: "192.168.1.1"
     port: 9030
-    user: "root"
-    password: "test"
-  feishu:
-    webhook_url: "https://example.com/hook"
+  notify:
+    channel: "feishu"
+    feishu:
+      webhook_url: "https://example.com/hook"
   alert:
-    scan_interval: "30s"
-  database:
-    - database: "my_db"
-`
-	cfg, err := LoadFromYAML([]byte(hostYAML), "doris_alert")
+    lag:
+      threshold: 8000
+`)
+	cfg, err := LoadFromBytes(data, "doris_alert")
 	if err != nil {
-		t.Fatalf("LoadFromYAML() error: %v", err)
+		t.Fatalf("LoadFromBytes 命名空间失败: %v", err)
 	}
-	if cfg.Doris.Host != "127.0.0.1" {
-		t.Errorf("host = %q, want %q", cfg.Doris.Host, "127.0.0.1")
+	if cfg.Doris.Host != "192.168.1.1" {
+		t.Errorf("Doris.Host = %q, 期望 192.168.1.1", cfg.Doris.Host)
 	}
-	if cfg.Alert.ScanInterval.Duration != 30*time.Second {
-		t.Errorf("scan_interval = %v, want 30s", cfg.Alert.ScanInterval)
-	}
-	if len(cfg.Database) != 1 || cfg.Database[0].Database != "my_db" {
-		t.Errorf("database = %v, want [my_db]", cfg.Database)
+	if cfg.Alert.Lag.Threshold != 8000 {
+		t.Errorf("Lag.Threshold = %d, 期望 8000", cfg.Alert.Lag.Threshold)
 	}
 }
 
-func TestLoadFromYAML_EmptyNamespace(t *testing.T) {
-	yamlData := `
-doris:
-  host: "127.0.0.1"
-feishu:
-  webhook_url: "https://example.com/hook"
-database:
-  - database: "db1"
-`
-	cfg, err := LoadFromYAML([]byte(yamlData), "")
-	if err != nil {
-		t.Fatalf("LoadFromYAML() error: %v", err)
-	}
-	if cfg.Doris.Host != "127.0.0.1" {
-		t.Errorf("host = %q, want %q", cfg.Doris.Host, "127.0.0.1")
-	}
-}
-
-func TestLoadFromYAML_NamespaceNotFound(t *testing.T) {
-	yamlData := `
+func TestLoadFromBytes_NamespaceNotFound(t *testing.T) {
+	data := []byte(`
 server:
   port: 8080
-`
-	_, err := LoadFromYAML([]byte(yamlData), "doris_alert")
+`)
+	_, err := LoadFromBytes(data, "doris_alert")
 	if err == nil {
-		t.Fatal("expected error for missing namespace")
-	}
-}
-
-func TestLoadFromYAML_InvalidYAML(t *testing.T) {
-	_, err := LoadFromYAML([]byte(":::invalid:::"), "doris_alert")
-	if err == nil {
-		t.Fatal("expected error for invalid yaml")
-	}
-}
-
-func TestLoadFromYAML_WithDefaults(t *testing.T) {
-	yamlData := `
-my_alert:
-  doris:
-    host: "127.0.0.1"
-  feishu:
-    webhook_url: "https://example.com/hook"
-  database:
-    - database: "db1"
-`
-	cfg, err := LoadFromYAML([]byte(yamlData), "my_alert")
-	if err != nil {
-		t.Fatalf("LoadFromYAML() error: %v", err)
-	}
-	// Defaults should be applied.
-	if cfg.Doris.Port != 9030 {
-		t.Errorf("default port = %d, want 9030", cfg.Doris.Port)
-	}
-	if cfg.Alert.ScanInterval.Duration != 60*time.Second {
-		t.Errorf("default scan_interval = %v, want 60s", cfg.Alert.ScanInterval)
-	}
-}
-
-func TestScanDatabases_DefaultMode(t *testing.T) {
-	content := `
-feishu:
-  webhook_url: "https://example.com/hook"
-database:
-  - database: "db1"
-`
-	path := writeTemp(t, content)
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load() error: %v", err)
-	}
-	if cfg.ScanDatabases.Mode != "configured" {
-		t.Errorf("default mode = %q, want %q", cfg.ScanDatabases.Mode, "configured")
-	}
-}
-
-func TestScanDatabases_ModeAll_NoDatabase(t *testing.T) {
-	content := `
-feishu:
-  webhook_url: "https://example.com/hook"
-scan_databases:
-  mode: "all"
-`
-	path := writeTemp(t, content)
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load() error: %v", err)
-	}
-	if cfg.ScanDatabases.Mode != "all" {
-		t.Errorf("mode = %q, want %q", cfg.ScanDatabases.Mode, "all")
-	}
-	if len(cfg.Database) != 0 {
-		t.Errorf("database should be empty in mode=all, got %d", len(cfg.Database))
-	}
-}
-
-func TestScanDatabases_InvalidMode(t *testing.T) {
-	content := `
-feishu:
-  webhook_url: "https://example.com/hook"
-scan_databases:
-  mode: "invalid"
-database:
-  - database: "db1"
-`
-	path := writeTemp(t, content)
-	_, err := Load(path)
-	if err == nil {
-		t.Fatal("expected error for invalid mode")
-	}
-}
-
-func TestScanDatabases_InvalidRegex(t *testing.T) {
-	content := `
-feishu:
-  webhook_url: "https://example.com/hook"
-scan_databases:
-  mode: "all"
-  exclude_patterns:
-    - "[invalid"
-`
-	path := writeTemp(t, content)
-	_, err := Load(path)
-	if err == nil {
-		t.Fatal("expected error for invalid regex")
-	}
-}
-
-func TestFilterDatabases_SystemDBs(t *testing.T) {
-	cfg := &Config{
-		ScanDatabases: ScanDatabasesConfig{Mode: "all"},
-	}
-	allDBs := []string{"information_schema", "__internal_schema", "mysql", "prod_db", "test_db"}
-	result := cfg.FilterDatabases(allDBs)
-	if len(result) != 2 {
-		t.Fatalf("result count = %d, want 2, got %v", len(result), result)
-	}
-	if result[0] != "prod_db" || result[1] != "test_db" {
-		t.Errorf("result = %v, want [prod_db test_db]", result)
-	}
-}
-
-func TestFilterDatabases_Exclude(t *testing.T) {
-	cfg := &Config{
-		ScanDatabases: ScanDatabasesConfig{
-			Mode:    "all",
-			Exclude: []string{"tmp_db", "staging"},
-		},
-	}
-	allDBs := []string{"prod_db", "tmp_db", "staging", "dev_db"}
-	result := cfg.FilterDatabases(allDBs)
-	if len(result) != 2 {
-		t.Fatalf("result count = %d, want 2, got %v", len(result), result)
-	}
-	if result[0] != "prod_db" || result[1] != "dev_db" {
-		t.Errorf("result = %v, want [prod_db dev_db]", result)
+		t.Fatal("期望报错命名空间未找到")
 	}
 }
 
 func TestFilterDatabases_ExcludePatterns(t *testing.T) {
 	cfg := &Config{
 		ScanDatabases: ScanDatabasesConfig{
-			Mode:            "all",
-			ExcludePatterns: []string{"^test_", ".*_backup$"},
+			Exclude:         []string{"information_schema"},
+			ExcludePatterns: []string{`^tmp_.*`, `.*_bak$`},
 		},
 	}
-	allDBs := []string{"prod_db", "test_dev", "test_staging", "db_backup", "real_db"}
-	result := cfg.FilterDatabases(allDBs)
-	if len(result) != 2 {
-		t.Fatalf("result count = %d, want 2, got %v", len(result), result)
+	input := []string{
+		"my_db",
+		"information_schema",
+		"tmp_test",
+		"tmp_prod",
+		"old_bak",
+		"production",
 	}
-	if result[0] != "prod_db" || result[1] != "real_db" {
-		t.Errorf("result = %v, want [prod_db real_db]", result)
+	result := cfg.FilterDatabases(input)
+	expected := []string{"my_db", "production"}
+	if len(result) != len(expected) {
+		t.Fatalf("期望 %d 个，得到 %d 个: %v", len(expected), len(result), result)
+	}
+	for i, db := range result {
+		if db != expected[i] {
+			t.Errorf("result[%d] = %q, 期望 %q", i, db, expected[i])
+		}
 	}
 }
 
-func TestFilterDatabases_OverrideSystemDBs(t *testing.T) {
+func TestFilterDatabases_InvalidRegex(t *testing.T) {
 	cfg := &Config{
 		ScanDatabases: ScanDatabasesConfig{
-			Mode:              "all",
-			OverrideSystemDBs: []string{"__statistics__"},
+			ExcludePatterns: []string{`[invalid`},
 		},
 	}
-	allDBs := []string{"information_schema", "__statistics__", "prod_db"}
-	result := cfg.FilterDatabases(allDBs)
-	if len(result) != 1 {
-		t.Fatalf("result count = %d, want 1, got %v", len(result), result)
-	}
-	if result[0] != "prod_db" {
-		t.Errorf("result = %v, want [prod_db]", result)
+	input := []string{"my_db"}
+	result := cfg.FilterDatabases(input)
+	// 无效正则应被跳过，不影响结果
+	if len(result) != 1 || result[0] != "my_db" {
+		t.Errorf("无效正则应被跳过，得到 %v", result)
 	}
 }
 
-func TestFilterDatabases_ExcludeOverDatabase(t *testing.T) {
+func TestValidate_InvalidRegexPattern(t *testing.T) {
 	cfg := &Config{
+		Notify: NotifyConfig{
+			Channel: "feishu",
+			Feishu:  FeishuConfig{WebhookURL: "https://example.com/hook"},
+		},
 		ScanDatabases: ScanDatabasesConfig{
-			Mode:    "all",
-			Exclude: []string{"shared_db"},
-		},
-		Database: []DatabaseRule{
-			{Database: "shared_db"},
+			ExcludePatterns: []string{`[invalid`},
 		},
 	}
-	allDBs := []string{"shared_db", "prod_db"}
-	result := cfg.FilterDatabases(allDBs)
-	// exclude should take priority over database section
-	if len(result) != 1 {
-		t.Fatalf("result count = %d, want 1, got %v", len(result), result)
+	err := validate(cfg)
+	if err == nil {
+		t.Fatal("期望校验失败")
 	}
-	if result[0] != "prod_db" {
-		t.Errorf("result = %v, want [prod_db]", result)
-	}
-}
-
-func TestLagConfig_DefaultDisabled(t *testing.T) {
-	content := `
-feishu:
-  webhook_url: "https://example.com/hook"
-database:
-  - database: "db1"
-`
-	path := writeTemp(t, content)
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load() error: %v", err)
-	}
-	if cfg.Alert.Lag.Enabled {
-		t.Error("lag should be disabled by default")
-	}
-	if cfg.Alert.Lag.Threshold != 10000 {
-		t.Errorf("lag threshold = %d, want 10000", cfg.Alert.Lag.Threshold)
-	}
-}
-
-func TestLagConfig_Enabled(t *testing.T) {
-	content := `
-feishu:
-  webhook_url: "https://example.com/hook"
-alert:
-  lag:
-    enabled: true
-    threshold: 5000
-database:
-  - database: "db1"
-`
-	path := writeTemp(t, content)
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load() error: %v", err)
-	}
-	if !cfg.Alert.Lag.Enabled {
-		t.Error("lag should be enabled")
-	}
-	if cfg.Alert.Lag.Threshold != 5000 {
-		t.Errorf("lag threshold = %d, want 5000", cfg.Alert.Lag.Threshold)
-	}
-}
-
-func TestGetEffectiveLag_ThreeLayerOverride(t *testing.T) {
-	globalEnabled := true
-	dbThreshold := int64(5000)
-	jobThreshold := int64(1000)
-
-	cfg := &Config{
-		Alert: AlertConfig{
-			Lag: LagConfig{Enabled: true, Threshold: 10000},
-		},
-		Database: []DatabaseRule{
-			{
-				Database: "db1",
-				Alert: &AlertOverride{
-					Lag: &LagOverride{Threshold: &dbThreshold},
-				},
-				Jobs: []JobRule{
-					{
-						Name: "job1",
-						Alert: &AlertOverride{
-							Lag: &LagOverride{Enabled: &globalEnabled, Threshold: &jobThreshold},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	// Global default
-	enabled, threshold := cfg.GetEffectiveLag("other_db", "other_job")
-	if !enabled || threshold != 10000 {
-		t.Errorf("global: enabled=%v threshold=%d, want true 10000", enabled, threshold)
-	}
-
-	// Database-level override
-	enabled, threshold = cfg.GetEffectiveLag("db1", "other_job")
-	if !enabled || threshold != 5000 {
-		t.Errorf("db-level: enabled=%v threshold=%d, want true 5000", enabled, threshold)
-	}
-
-	// Job-level override
-	enabled, threshold = cfg.GetEffectiveLag("db1", "job1")
-	if !enabled || threshold != 1000 {
-		t.Errorf("job-level: enabled=%v threshold=%d, want true 1000", enabled, threshold)
-	}
-}
-
-func TestFilterDatabases_Empty(t *testing.T) {
-	cfg := &Config{
-		ScanDatabases: ScanDatabasesConfig{Mode: "all"},
-	}
-	result := cfg.FilterDatabases(nil)
-	if len(result) != 0 {
-		t.Errorf("result should be empty, got %v", result)
-	}
-}
-
-func writeTemp(t *testing.T, content string) string {
-	t.Helper()
-	f, err := os.CreateTemp(t.TempDir(), "config-*.yaml")
-	if err != nil {
-		t.Fatalf("create temp: %v", err)
-	}
-	if _, err := f.WriteString(content); err != nil {
-		t.Fatalf("write temp: %v", err)
-	}
-	f.Close()
-	return f.Name()
 }

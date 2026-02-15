@@ -1,7 +1,8 @@
-.PHONY: build test run clean lint verify
-
 BINARY=doris-alert
 BUILD_DIR=bin
+VERSION=2.0.0
+
+.PHONY: build test clean lint verify run
 
 build:
 	@mkdir -p $(BUILD_DIR)
@@ -12,7 +13,7 @@ test:
 	go test ./... -v
 
 run: build
-	./$(BUILD_DIR)/$(BINARY) -c conf/alert.yaml
+	./$(BUILD_DIR)/$(BINARY) -c conf/config.yaml
 
 clean:
 	rm -rf $(BUILD_DIR)
