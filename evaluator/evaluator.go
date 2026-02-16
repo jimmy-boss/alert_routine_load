@@ -39,6 +39,7 @@ func WithLogger(logger glog.HLoggerBase) Option {
 }
 
 // Evaluator 告警评估引擎。
+// 注意：非并发安全，调用方需保证 Reconcile/Evaluate/UpdateAfterSend 不被并发调用。
 type Evaluator struct {
 	cfg    *config.Config
 	store  *store.StatusStore

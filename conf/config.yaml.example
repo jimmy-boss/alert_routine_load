@@ -21,7 +21,7 @@ notify:
 # 告警策略
 alert:
   lag:
-    # 全局默认阈值，partition lag 超过此值触发告警
+    # 全局默认阈值，partition lag 超过此值触发告警（0 = 不检查 lag）
     threshold: 10000
     # 恢复阈值，lag 降到此值以下判定恢复（应 <= threshold）
     recovery: 5000
@@ -46,6 +46,7 @@ scan_databases:
     - "mysql"
     - "_statistics_"
     - "doris_audit_db__"
+    - "__internal_schema"
   # 正则排除（匹配数据库名的正则表达式）
   exclude_patterns:
     - "^tmp_.*"       # 排除 tmp_ 开头的库
@@ -54,12 +55,14 @@ scan_databases:
 # 数据库级规则（可选，支持三层覆盖：全局 → database → job）
 database:
   - name: "your_database"
+    alert:                    # database 级覆盖（对该库所有 job 生效）
+      lag:
+        threshold: 8000
     jobs:
       - name: "your_job_name"
-        alert:
+        alert:                # job 级覆盖（优先级最高）
           lag:
-            # job 级阈值覆盖
             threshold: 5000
             recovery: 2000
   - name: "another_database"
-    # 不指定 jobs 则对该数据库下所有 job 生效全局默认配置
+    # 不指定 alert/jobs 则对该数据库下所有 job 生效全局默认配置

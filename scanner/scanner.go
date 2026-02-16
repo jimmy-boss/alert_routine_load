@@ -93,21 +93,27 @@ func (s *Scanner) QueryJobList(ctx context.Context, databases []string, jobFilte
 	defer rows.Close()
 
 	var refs []JobRef
+
+	// 预构建 nameSet，避免循环内重复创建。
+	filterSets := make(map[string]map[string]bool, len(jobFilter))
+	for db, names := range jobFilter {
+		if len(names) > 0 {
+			set := make(map[string]bool, len(names))
+			for _, n := range names {
+				set[n] = true
+			}
+			filterSets[db] = set
+		}
+	}
+
 	for rows.Next() {
 		var dbName, jobName string
 		if err := rows.Scan(&dbName, &jobName); err != nil {
 			s.logger.Warn("scan job list row failed", zap.Error(err))
 			continue
 		}
-		// 应用任务名过滤。
-		if names, ok := jobFilter[dbName]; ok && len(names) > 0 {
-			nameSet := make(map[string]bool, len(names))
-			for _, n := range names {
-				nameSet[n] = true
-			}
-			if !nameSet[jobName] {
-				continue
-			}
+		if set, ok := filterSets[dbName]; ok && !set[jobName] {
+			continue
 		}
 		refs = append(refs, JobRef{DBName: dbName, JobName: jobName})
 	}

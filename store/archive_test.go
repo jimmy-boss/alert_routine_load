@@ -30,6 +30,7 @@ func TestArchive(t *testing.T) {
 	}
 
 	s.Archive(status)
+	s.Save() // Archive 仅写内存，需显式 Save 持久化
 
 	// 验证持久化
 	s2, err := NewArchiveStore(dir)

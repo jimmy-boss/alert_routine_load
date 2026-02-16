@@ -38,6 +38,7 @@ var DefaultSystemDBs = []string{
 	"mysql",
 	"_statistics_",
 	"doris_audit_db__",
+	"__internal_schema",
 }
 
 // Config 是顶层配置结构体。
@@ -73,6 +74,7 @@ type FeishuConfig struct {
 // DingtalkConfig 钉钉通知配置。
 type DingtalkConfig struct {
 	WebhookURL string `yaml:"webhook_url"`
+	Secret     string `yaml:"secret"`
 }
 
 // AlertConfig 告警全局配置。
@@ -104,8 +106,9 @@ type ScanDatabasesConfig struct {
 
 // DatabaseRule 数据库级规则。
 type DatabaseRule struct {
-	Name string    `yaml:"name"`
-	Jobs []JobRule `yaml:"jobs"`
+	Name  string         `yaml:"name"`
+	Alert *AlertOverride `yaml:"alert,omitempty"`
+	Jobs  []JobRule      `yaml:"jobs"`
 }
 
 // JobRule Job 级规则。
@@ -238,6 +241,13 @@ func validate(cfg *Config) error {
 		}
 	}
 
+	if cfg.Alert.Lag.BackoffFactor < 1.0 {
+		return fmt.Errorf("alert.lag.backoff_factor 不能小于 1.0，当前值: %v", cfg.Alert.Lag.BackoffFactor)
+	}
+	if cfg.Alert.Lag.MaxSendCount < 0 {
+		return fmt.Errorf("alert.lag.max_send_count 不能为负数，当前值: %d", cfg.Alert.Lag.MaxSendCount)
+	}
+
 	return nil
 }
 
@@ -296,10 +306,16 @@ func (c *Config) GetEffectiveLag(database, jobName string) EffectiveLag {
 		Recovery:  c.Alert.Lag.Recovery,
 	}
 
-	// database 级覆盖
 	for _, db := range c.Database {
 		if db.Name != database {
 			continue
+		}
+		// database 级覆盖
+		if db.Alert != nil && db.Alert.Lag.Threshold != nil {
+			result.Threshold = *db.Alert.Lag.Threshold
+		}
+		if db.Alert != nil && db.Alert.Lag.Recovery != nil {
+			result.Recovery = *db.Alert.Lag.Recovery
 		}
 		// job 级覆盖
 		for _, job := range db.Jobs {

@@ -132,8 +132,10 @@ database:
 
 | 配置项 | 全局默认 | database 级 | job 级 |
 |--------|----------|-------------|--------|
-| lag.threshold | `alert.lag.threshold` | — | `database[].jobs[].alert.lag.threshold` |
-| lag.recovery | `alert.lag.recovery` | — | `database[].jobs[].alert.lag.recovery` |
+| lag.threshold | `alert.lag.threshold` | `database[].alert.lag.threshold` | `database[].jobs[].alert.lag.threshold` |
+| lag.recovery | `alert.lag.recovery` | `database[].alert.lag.recovery` | `database[].jobs[].alert.lag.recovery` |
+
+**注意**: `threshold=0` 表示不检查 lag 延迟（等效关闭该级别的 lag 告警）。
 
 ### 数据库扫描排除
 
@@ -196,6 +198,7 @@ notify:
     sign_secret: ""    # 可选，签名校验
   dingtalk:
     webhook_url: "https://oapi.dingtalk.com/robot/send?access_token=xxx"
+    secret: ""           # 可选，加签密钥
 ```
 
 ### 完整配置参考
@@ -214,10 +217,11 @@ notify:
     sign_secret: ""
   dingtalk:
     webhook_url: ""
+    secret: ""
 
 alert:
   lag:
-    threshold: 10000          # lag 告警阈值（per-partition）
+    threshold: 10000          # lag 告警阈值（per-partition），0 = 不检查 lag
     recovery: 5000            # lag 恢复阈值
     alert_interval: "5m"      # 告警发送间隔（退避初始值）
     backoff_factor: 1.2       # 退避系数（1.0 = 固定间隔）
@@ -236,9 +240,12 @@ scan_databases:
 
 database:                     # 数据库级规则（可选）
   - name: "my_db"
+    alert:                    # database 级覆盖（对该库所有 job 生效）
+      lag:
+        threshold: 8000
     jobs:
       - name: "my_job"
-        alert:
+        alert:                # job 级覆盖（优先级最高）
           lag:
             threshold: 20000
             recovery: 10000

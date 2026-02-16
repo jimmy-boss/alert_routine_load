@@ -61,7 +61,8 @@ func NewArchiveStore(dir string, opts ...ArchiveOption) (*ArchiveStore, error) {
 	return s, nil
 }
 
-// Archive 将 AlertStatus 转为 AlertRecord 写入归档并持久化。
+// Archive 将 AlertStatus 转为 AlertRecord 写入归档（仅内存）。
+// 调用方需在适当时机调用 Save() 持久化。
 func (s *ArchiveStore) Archive(status model.AlertStatus) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -78,10 +79,6 @@ func (s *ArchiveStore) Archive(status model.AlertStatus) {
 	}
 	s.records = append(s.records, record)
 	s.dirty = true
-
-	if err := s.saveLocked(); err != nil {
-		s.logger.Error("归档持久化失败", zap.Error(err))
-	}
 }
 
 // Save 持久化到 archive.json，同时清理过期记录。
