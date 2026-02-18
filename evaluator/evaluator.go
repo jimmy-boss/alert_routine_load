@@ -64,8 +64,8 @@ func New(cfg *config.Config, st *store.StatusStore, opts ...Option) *Evaluator {
 }
 
 // Reconcile 遍历 store 中 alerting 的条目，执行状态流转：
-// - lag source: lag 降到阈值以下 → mark recovering
-// - paused source: job 不再 paused → mark recovering
+// - lag source: lag < recovery 阈值且持续 stability_window → mark recovering
+// - paused source: job 不再 paused 且持续 stability_window → mark recovering
 // - job 消失 → mark recovering
 func (e *Evaluator) Reconcile(dbJobs map[string][]model.RoutineLoadJob) {
 	jobLookup := make(map[string]model.RoutineLoadJob)
@@ -76,8 +76,14 @@ func (e *Evaluator) Reconcile(dbJobs map[string][]model.RoutineLoadJob) {
 		}
 	}
 
-	// 先用 Range（RLock）收集需要恢复的 key
+	stabilityWindow := e.cfg.Alert.Lag.StabilityWindow.Duration
+	now := time.Now()
+
+	// 先用 Range（RLock）收集需要操作的 key
 	var toRecover []string
+	var toSetRecoverySince []string
+	var toClearRecoverySince []string
+
 	e.store.Range(func(key string, st *model.AlertStatus) bool {
 		if st.State != model.StateAlerting {
 			return true
@@ -95,21 +101,40 @@ func (e *Evaluator) Reconcile(dbJobs map[string][]model.RoutineLoadJob) {
 		}
 		lag := e.cfg.GetEffective(dbName, job.Name)
 
+		shouldRecover := false
 		switch st.Source {
 		case "lag":
-			exceeded := checkLag(job, lag.Threshold)
-			if len(exceeded) == 0 {
+			exceeded := checkLag(job, lag.Recovery)
+			shouldRecover = len(exceeded) == 0
+		case "paused":
+			shouldRecover = !isPaused(job.State)
+		}
+
+		if shouldRecover {
+			if st.RecoverySince.IsZero() {
+				toSetRecoverySince = append(toSetRecoverySince, key)
+			} else if now.Sub(st.RecoverySince) >= stabilityWindow {
 				toRecover = append(toRecover, key)
 			}
-		case "paused":
-			if !isPaused(job.State) {
-				toRecover = append(toRecover, key)
+		} else {
+			if !st.RecoverySince.IsZero() {
+				toClearRecoverySince = append(toClearRecoverySince, key)
 			}
 		}
 		return true
 	})
 
-	// 再用 Update（WLock）批量修改
+	// Range 结束后，用 Update（WLock）批量修改
+	for _, key := range toSetRecoverySince {
+		e.store.Update(key, func(st *model.AlertStatus) {
+			st.RecoverySince = now
+		})
+	}
+	for _, key := range toClearRecoverySince {
+		e.store.Update(key, func(st *model.AlertStatus) {
+			st.RecoverySince = time.Time{}
+		})
+	}
 	for _, key := range toRecover {
 		e.store.Update(key, func(st *model.AlertStatus) {
 			st.MarkRecovering()
@@ -162,10 +187,11 @@ func (e *Evaluator) evaluateOne(ctx context.Context, key, dbName string, job mod
 	}
 
 	source := "paused"
+	var exceededLag []model.LagInfo
 	if isRunning(job.State) && lag.Threshold > 0 {
 		source = "lag"
-		exceeded := checkLag(job, lag.Threshold)
-		if len(exceeded) == 0 {
+		exceededLag = checkLag(job, lag.Threshold)
+		if len(exceededLag) == 0 {
 			return Decision{Action: "skip", Reason: "lag below threshold"}
 		}
 	}
@@ -183,8 +209,7 @@ func (e *Evaluator) evaluateOne(ctx context.Context, key, dbName string, job mod
 		errorDetail = truncate(errorDetail, 300)
 	}
 	if source == "lag" {
-		exceeded := checkLag(job, lag.Threshold)
-		lagSummary := formatLagSummary(exceeded)
+		lagSummary := formatLagSummary(exceededLag)
 		if errorDetail != "" {
 			errorDetail = lagSummary + "\n" + errorDetail
 		} else {
@@ -228,13 +253,10 @@ func (e *Evaluator) evaluateOne(ctx context.Context, key, dbName string, job mod
 
 // UpdateAfterSend 告警发送成功后更新 status。
 func (e *Evaluator) UpdateAfterSend(key string) {
-	st := e.store.Get(key)
-	if st == nil {
-		return
-	}
-	st.LastSentAt = time.Now()
-	st.SendCount++
-	e.store.Set(key, st)
+	e.store.Update(key, func(st *model.AlertStatus) {
+		st.LastSentAt = time.Now()
+		st.SendCount++
+	})
 }
 
 // isPaused 判断 job 状态是否为暂停。
@@ -336,9 +358,6 @@ func (e *Evaluator) fetchURL(ctx context.Context, url string) (string, error) {
 	}
 	resp, err := e.client.Do(req)
 	if err != nil {
-		if resp != nil {
-			resp.Body.Close()
-		}
 		return "", err
 	}
 	defer resp.Body.Close()

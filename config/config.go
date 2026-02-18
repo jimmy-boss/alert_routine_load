@@ -85,12 +85,13 @@ type AlertConfig struct {
 
 // LagConfig 延迟告警配置。
 type LagConfig struct {
-	Threshold     int64    `yaml:"threshold"`
-	Recovery      int64    `yaml:"recovery"`
-	AlertInterval Duration `yaml:"alert_interval"`
-	BackoffFactor float64  `yaml:"backoff_factor"`
-	MaxInterval   Duration `yaml:"max_interval"`
-	MaxSendCount  int      `yaml:"max_send_count"`
+	Threshold       int64    `yaml:"threshold"`
+	Recovery        int64    `yaml:"recovery"`
+	AlertInterval   Duration `yaml:"alert_interval"`
+	BackoffFactor   float64  `yaml:"backoff_factor"`
+	MaxInterval     Duration `yaml:"max_interval"`
+	MaxSendCount    int      `yaml:"max_send_count"`
+	StabilityWindow Duration `yaml:"stability_window"` // 恢复稳定窗口，连续满足条件时长
 }
 
 // HistoryConfig 历史记录配置。
@@ -211,6 +212,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Alert.Lag.MaxSendCount == 0 {
 		cfg.Alert.Lag.MaxSendCount = 10
+	}
+	if cfg.Alert.Lag.StabilityWindow.Duration == 0 {
+		cfg.Alert.Lag.StabilityWindow = Duration{3 * time.Minute}
 	}
 	if cfg.Alert.History.RetentionDays == 0 {
 		cfg.Alert.History.RetentionDays = 7

@@ -123,7 +123,9 @@ func (s *Scanner) QueryJobList(ctx context.Context, databases []string, jobFilte
 // QueryJobDetail 获取单个 routine load 任务的完整详情。
 // 使用 SHOW ROUTINE LOAD FOR `db`.`job`，无需 USE database。
 func (s *Scanner) QueryJobDetail(ctx context.Context, dbName, jobName string) (*model.RoutineLoadJob, error) {
-	query := fmt.Sprintf("SHOW ROUTINE LOAD FOR `%s`.`%s`", dbName, jobName)
+	query := fmt.Sprintf("SHOW ROUTINE LOAD FOR `%s`.`%s`",
+		strings.ReplaceAll(dbName, "`", "``"),
+		strings.ReplaceAll(jobName, "`", "``"))
 	rows, err := s.db.WithContext(ctx).Raw(query).Rows()
 	if err != nil {
 		return nil, fmt.Errorf("show routine load for %s.%s: %w", dbName, jobName, err)

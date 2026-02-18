@@ -34,17 +34,18 @@ func (s AlertState) String() string {
 
 // AlertStatus 跟踪单个 Job 的告警状态，支持跨重启持久化。
 type AlertStatus struct {
-	JobKey       string     `json:"job_key"` // "db:jobId"
-	JobName      string     `json:"job_name"`
-	Database     string     `json:"database"`
-	Source       string     `json:"source"`         // "paused" 或 "lag"
-	State        AlertState `json:"state"`          // 当前告警状态
-	AlertActive  bool       `json:"alert_active"`   // 是否正在告警
-	IsRecovery   bool       `json:"is_recovery"`    // 是否为恢复事件
-	FirstAlertAt time.Time  `json:"first_alert_at"` // 首次告警时间
-	LastSentAt   time.Time  `json:"last_sent_at"`   // 最后发送时间
-	RecoveredAt  time.Time  `json:"recovered_at"`   // 恢复时间，零值表示仍在告警
-	SendCount    int        `json:"send_count"`     // 累计发送次数
+	JobKey        string     `json:"job_key"` // "db:jobId"
+	JobName       string     `json:"job_name"`
+	Database      string     `json:"database"`
+	Source        string     `json:"source"`         // "paused" 或 "lag"
+	State         AlertState `json:"state"`          // 当前告警状态
+	AlertActive   bool       `json:"alert_active"`   // 是否正在告警
+	IsRecovery    bool       `json:"is_recovery"`    // 是否为恢复事件
+	FirstAlertAt  time.Time  `json:"first_alert_at"` // 首次告警时间
+	LastSentAt    time.Time  `json:"last_sent_at"`   // 最后发送时间
+	RecoveredAt   time.Time  `json:"recovered_at"`   // 恢复时间，零值表示仍在告警
+	RecoverySince time.Time  `json:"recovery_since"` // 首次满足恢复条件的时间（防抖用）
+	SendCount     int        `json:"send_count"`     // 累计发送次数
 }
 
 // IsActive 返回当前告警是否仍在进行中。
@@ -53,6 +54,8 @@ func (s *AlertStatus) IsActive() bool {
 }
 
 // MarkRecovering 将状态标记为恢复中。
+// RecoveredAt 在此处设置，记录恢复确认时间（stability_window 满足后），
+// 用于 RecoveryInfo.Duration 和 Archive 归档。MarkRecovered 不更新此字段。
 func (s *AlertStatus) MarkRecovering() {
 	s.State = StateRecovering
 	s.IsRecovery = true

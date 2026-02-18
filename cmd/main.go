@@ -10,6 +10,7 @@ import (
 	"hash/fnv"
 	"os"
 	"os/signal"
+	"runtime"
 	"sync"
 	"syscall"
 	"time"
@@ -51,6 +52,7 @@ type Handler struct {
 
 	workerCount int
 	workerChs   []chan JobTask // 每个 worker 独立 channel，按 database hash 投递
+	roundWg     sync.WaitGroup // 跟踪每轮 dispatch 的 worker 处理进度，确保 Reconcile 前 worker 已完成
 	done        chan struct{}
 
 	dbMu      sync.RWMutex
@@ -129,7 +131,14 @@ func (h *Handler) Run() {
 
 	go h.watchSignal()
 	go h.refreshDBLoop()
-	go h.scanJobLoop()
+
+	// scanJobLoop 用 WaitGroup 跟踪，确保关闭 channel 前已退出
+	var scanWg sync.WaitGroup
+	scanWg.Add(1)
+	go func() {
+		defer scanWg.Done()
+		h.scanJobLoop()
+	}()
 
 	var wg sync.WaitGroup
 	for i := 0; i < h.workerCount; i++ {
@@ -138,7 +147,10 @@ func (h *Handler) Run() {
 	}
 
 	<-h.done
-	h.log.Info("收到关闭信号，等待 worker 退出...")
+	h.log.Info("收到关闭信号，等待扫描循环和 worker 退出...")
+
+	// 等待 scanJobLoop 退出后再关闭 channel，避免 send on closed channel panic
+	scanWg.Wait()
 
 	for _, ch := range h.workerChs {
 		close(ch)
@@ -158,7 +170,10 @@ func (h *Handler) Run() {
 // watchSignal 监听系统信号，关闭 done channel。
 func (h *Handler) watchSignal() {
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
+	signal.Notify(sigCh, os.Interrupt)
+	if runtime.GOOS != "windows" {
+		signal.Notify(sigCh, syscall.SIGTERM)
+	}
 	sig := <-sigCh
 	h.log.Info("收到关闭信号", zap.String("signal", sig.String()))
 	close(h.done)
@@ -220,6 +235,9 @@ func (h *Handler) scanJobLoop() {
 
 // scanAndDispatch 扫描所有 job，执行全局 reconcile + 恢复通知，再投递到 worker channel。
 func (h *Handler) scanAndDispatch() {
+	// 等待上一轮 worker 处理完成，避免 Reconcile 与 Evaluate 并发
+	h.roundWg.Wait()
+
 	h.dbMu.RLock()
 	databases := h.databases
 	h.dbMu.RUnlock()
@@ -240,9 +258,10 @@ func (h *Handler) scanAndDispatch() {
 	// 全局 Reconcile：状态流转
 	h.eval.Reconcile(dbJobs)
 
-	// 全局收集恢复 + 发送恢复通知
-	recovered := h.statusStore.CollectRecovering()
-	for _, st := range recovered {
+	// 全局收集恢复候选 + 发送恢复通知（发送成功后才标记 recovered）
+	candidates := h.statusStore.CollectRecoveringCandidates()
+	var recovered []model.AlertStatus
+	for _, st := range candidates {
 		info := model.RecoveryInfo{
 			JobKey:      st.JobKey,
 			JobName:     st.JobName,
@@ -253,16 +272,21 @@ func (h *Handler) scanAndDispatch() {
 			SendCount:   st.SendCount,
 		}
 		if err := h.nt.SendRecovery(info); err != nil {
-			h.log.Error("发送恢复通知失败", zap.String("job_key", st.JobKey), zap.Error(err))
-		} else {
-			h.log.Info("恢复通知已发送", zap.String("job_key", st.JobKey), zap.Duration("duration", info.Duration))
+			h.log.Error("发送恢复通知失败，下一轮重试", zap.String("job_key", st.JobKey), zap.Error(err))
+			continue
 		}
+		// 发送成功，标记为 recovered
+		h.statusStore.Update(st.JobKey, func(s *model.AlertStatus) {
+			s.MarkRecovered()
+		})
+		recovered = append(recovered, st)
+		h.log.Info("恢复通知已发送", zap.String("job_key", st.JobKey), zap.Duration("duration", info.Duration))
 	}
 
 	// 全局移除已恢复条目（必须在 Evaluate 之前）
 	h.statusStore.RemoveRecovered()
 
-	// 归档
+	// 归档（仅成功发送恢复通知的条目）
 	for _, st := range recovered {
 		h.archiveStore.Archive(st)
 	}
@@ -277,7 +301,16 @@ func (h *Handler) scanAndDispatch() {
 		totalJobs += len(jobs)
 		idx := hashDatabase(dbName, h.workerCount)
 		for _, job := range jobs {
-			h.workerChs[idx] <- JobTask{Database: dbName, Job: job}
+			h.roundWg.Add(1)
+			select {
+			case h.workerChs[idx] <- JobTask{Database: dbName, Job: job}:
+			case <-h.done:
+				h.roundWg.Done() // 未投递成功，撤销 Add
+				h.log.Info("收到关闭信号，停止投递任务",
+					zap.Int("total_jobs", totalJobs),
+				)
+				return
+			}
 		}
 	}
 	h.log.Info("扫描完成，任务已投递",
@@ -300,6 +333,8 @@ func (h *Handler) worker(id int, wg *sync.WaitGroup) {
 
 // processJob 处理单个 job 的告警评估和发送（不含 reconcile/恢复逻辑）。
 func (h *Handler) processJob(task JobTask) {
+	defer h.roundWg.Done()
+
 	key := fmt.Sprintf("%s:%d", task.Database, task.Job.ID)
 	ctx := context.Background()
 
@@ -324,9 +359,6 @@ func (h *Handler) processJob(task JobTask) {
 			zap.String("database", d.Event.Database),
 		)
 	}
-
-	// 3. 持久化（单条告警后）
-	h.statusStore.Save()
 }
 
 // hashDatabase 对 database 名做 hash，用于投递到固定 worker。

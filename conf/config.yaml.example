@@ -23,8 +23,11 @@ alert:
   lag:
     # 全局默认阈值，partition lag 超过此值触发告警（0 = 不检查 lag）
     threshold: 10000
-    # 恢复阈值，lag 降到此值以下判定恢复（应 <= threshold）
+    # 恢复阈值，lag 降到此值以下才判定恢复（应 < threshold）
     recovery: 5000
+    # 恢复稳定窗口，连续满足恢复条件时长后才真正恢复（防抖）
+    # 适用于 lag 和 paused 两种告警
+    stability_window: "2m"
     # 告警发送间隔（退避初始值）
     alert_interval: "5m"
     # 退避系数，每次告警后间隔乘以此值（1.0 = 固定间隔）

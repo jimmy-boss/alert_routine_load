@@ -6,6 +6,7 @@ package notifier
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -14,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/jimmy-boss/alert_routine_load/v2/config"
@@ -109,7 +111,11 @@ func (n *DingtalkNotifier) sendMarkdown(title, text string) error {
 		if err != nil {
 			return fmt.Errorf("sign: %w", err)
 		}
-		webhookURL = fmt.Sprintf("%s&timestamp=%d&sign=%s", webhookURL, ts, sign)
+		sep := "?"
+		if strings.Contains(webhookURL, "?") {
+			sep = "&"
+		}
+		webhookURL = fmt.Sprintf("%s%stimestamp=%d&sign=%s", webhookURL, sep, ts, sign)
 	}
 
 	payload := map[string]interface{}{
@@ -125,7 +131,16 @@ func (n *DingtalkNotifier) sendMarkdown(title, text string) error {
 		return fmt.Errorf("marshal: %w", err)
 	}
 
-	resp, err := n.client.Post(webhookURL, "application/json", bytes.NewReader(body))
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, webhookURL, bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("new request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := n.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("post: %w", err)
 	}

@@ -149,3 +149,18 @@ func TestIsRunning(t *testing.T) {
 		}
 	}
 }
+
+func TestCheckLag_RecoveryThreshold(t *testing.T) {
+	// lag=5000, recovery=3000 → exceeded（lag > recovery）
+	job := model.RoutineLoadJob{Lag: `{"0":5000}`}
+	exceeded := checkLag(job, 3000)
+	if len(exceeded) != 1 {
+		t.Errorf("expected 1 exceeded, got %d", len(exceeded))
+	}
+
+	// lag=2000, recovery=3000 → not exceeded（lag < recovery）
+	exceeded = checkLag(job, 5000)
+	if len(exceeded) != 0 {
+		t.Errorf("expected 0 exceeded, got %d", len(exceeded))
+	}
+}

@@ -5,6 +5,7 @@ package notifier
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -142,7 +143,16 @@ func (n *FeishuNotifier) signURL() (string, error) {
 
 // post 发送 webhook 请求并校验响应。
 func (n *FeishuNotifier) post(url string, body []byte) (string, error) {
-	resp, err := n.client.Post(url, "application/json", bytes.NewReader(body))
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("new request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := n.client.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("post: %w", err)
 	}
@@ -301,12 +311,10 @@ func valueOrDash(s string) string {
 }
 
 // genSign 生成飞书 webhook 签名。
+// 签名算法: HMAC-SHA256(key=strToSign, msg="")，其中 strToSign = timestamp + "\n" + secret
 func genSign(secret string, timestamp int64) (string, error) {
 	strToSign := fmt.Sprintf("%d\n%s", timestamp, secret)
-	h := hmac.New(sha256.New, []byte(""))
-	if _, err := h.Write([]byte(strToSign)); err != nil {
-		return "", err
-	}
+	h := hmac.New(sha256.New, []byte(strToSign))
 	return base64.StdEncoding.EncodeToString(h.Sum(nil)), nil
 }
 

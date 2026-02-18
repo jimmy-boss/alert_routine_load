@@ -89,7 +89,7 @@ func TestRange(t *testing.T) {
 	}
 }
 
-func TestCollectRecovering(t *testing.T) {
+func TestCollectRecoveringCandidates(t *testing.T) {
 	s, _ := newTestStatusStore(t)
 
 	s.Set("alerting", &model.AlertStatus{
@@ -105,19 +105,20 @@ func TestCollectRecovering(t *testing.T) {
 		JobKey: "recovered", State: model.StateRecovered,
 	})
 
-	recovering := s.CollectRecovering()
-	if len(recovering) != 2 {
-		t.Fatalf("expected 2 recovering, got %d", len(recovering))
+	// CollectRecoveringCandidates 只收集不标记
+	candidates := s.CollectRecoveringCandidates()
+	if len(candidates) != 2 {
+		t.Fatalf("expected 2 recovering candidates, got %d", len(candidates))
 	}
 
-	// 收集后应标记为 recovered
-	for _, r := range recovering {
+	// 收集后状态不变，仍为 recovering
+	for _, r := range candidates {
 		st := s.Get(r.JobKey)
 		if st == nil {
 			t.Fatalf("expected %s to exist", r.JobKey)
 		}
-		if st.State != model.StateRecovered {
-			t.Fatalf("expected %s state=recovered, got %s", r.JobKey, st.State)
+		if st.State != model.StateRecovering {
+			t.Fatalf("expected %s state=recovering (unchanged), got %s", r.JobKey, st.State)
 		}
 	}
 
@@ -129,10 +130,17 @@ func TestCollectRecovering(t *testing.T) {
 		t.Fatal("recovered should remain recovered")
 	}
 
-	// 再次调用应返回空
-	recovering = s.CollectRecovering()
-	if len(recovering) != 0 {
-		t.Fatalf("expected 0 on second call, got %d", len(recovering))
+	// 模拟发送成功后标记 recovered
+	for _, r := range candidates {
+		s.Update(r.JobKey, func(st *model.AlertStatus) {
+			st.MarkRecovered()
+		})
+	}
+
+	// 再次调用应返回空（已标记为 recovered）
+	candidates = s.CollectRecoveringCandidates()
+	if len(candidates) != 0 {
+		t.Fatalf("expected 0 on second call, got %d", len(candidates))
 	}
 }
 

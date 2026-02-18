@@ -188,6 +188,36 @@ alert:
     backoff_factor: 1.0    # 等间隔
 ```
 
+### 恢复防抖
+
+告警恢复需要**连续满足条件**超过 `stability_window` 时长，避免状态波动导致告警/恢复抖动。
+
+**LAG 告警恢复**：lag < `recovery`（不是 `threshold`）且持续 `stability_window`
+
+**PAUSE 告警恢复**：job 不再 PAUSED 且持续 `stability_window`
+
+```
+阈值 10000    恢复 5000    稳定窗口 3min
+               ↑
+               lag 在 5000~10000 之间波动不会触发恢复
+```
+
+| 参数 | 含义 | 默认值  |
+|------|------|------|
+| `recovery` | lag 恢复阈值（应 < threshold） | 5000 |
+| `stability_window` | 恢复稳定窗口时长 | 2m   |
+
+**示例**（`threshold=10000, recovery=5000, stability_window=3m`）：
+
+```
+Cycle 1: lag=8000 < recovery → 开始计时
+Cycle 2: lag=6000 < recovery → 持续满足
+Cycle 3: lag=12000 > recovery → 条件不满足，计时归零
+Cycle 4: lag=4000 < recovery → 重新计时
+Cycle 5: lag=3000 < recovery → 持续满足
+Cycle 6: lag=2000 < recovery → 已满 2min → 恢复 ✅
+```
+
 ### 通知渠道
 
 ```yaml
@@ -222,7 +252,8 @@ notify:
 alert:
   lag:
     threshold: 10000          # lag 告警阈值（per-partition），0 = 不检查 lag
-    recovery: 5000            # lag 恢复阈值
+    recovery: 5000            # lag 恢复阈值（应 < threshold）
+    stability_window: "3m"    # 恢复稳定窗口，连续满足条件时长
     alert_interval: "5m"      # 告警发送间隔（退避初始值）
     backoff_factor: 1.2       # 退避系数（1.0 = 固定间隔）
     max_interval: "1h"        # 最大告警间隔（退避上限）

@@ -53,11 +53,16 @@ func NewStatusStore(dir string, opts ...StatusOption) (*StatusStore, error) {
 	return s, nil
 }
 
-// Get 返回指定 key 的告警状态，不存在返回 nil。
+// Get 返回指定 key 的告警状态副本，不存在返回 nil。
+// 返回的是副本，修改不影响 store 内部数据。如需修改请使用 Update。
 func (s *StatusStore) Get(key string) *model.AlertStatus {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.items[key]
+	if v, ok := s.items[key]; ok {
+		copy := *v
+		return &copy
+	}
+	return nil
 }
 
 // Set 设置指定 key 的告警状态。
@@ -110,18 +115,16 @@ func (s *StatusStore) Len() int {
 	return len(s.items)
 }
 
-// CollectRecovering 收集所有 State==StateRecovering 的条目，
-// 将其标记为 StateRecovered 并返回收集到的条目副本。
-func (s *StatusStore) CollectRecovering() []model.AlertStatus {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+// CollectRecoveringCandidates 收集所有 State==StateRecovering 的条目副本。
+// 不修改状态，调用方需在恢复通知发送成功后调用 Update + MarkRecovered。
+func (s *StatusStore) CollectRecoveringCandidates() []model.AlertStatus {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	var result []model.AlertStatus
 	for _, st := range s.items {
 		if st.State == model.StateRecovering {
 			result = append(result, *st)
-			st.MarkRecovered()
-			s.dirty = true
 		}
 	}
 	return result
