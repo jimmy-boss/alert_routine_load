@@ -1,8 +1,11 @@
-// Package notifier sends alerts to Feishu (Lark) webhook.
+// @Author: Jimmy
+// @DateTime: 2026/02/15
+
 package notifier
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
@@ -13,32 +16,35 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jimmy-boss/alert_routine_load/alerter"
-	"github.com/jimmy-boss/alert_routine_load/config"
-	"github.com/jimmy-boss/alert_routine_load/model"
+	"github.com/jimmy-boss/alert_routine_load/v2/config"
+	"github.com/jimmy-boss/alert_routine_load/v2/model"
 	"github.com/jimmy-boss/go-log/glog"
 	"go.uber.org/zap"
 )
 
-// Option is a functional option for Notifier.
-type Option func(*Notifier)
+// FeishuOption 飞书通知器的函数选项。
+type FeishuOption func(*FeishuNotifier)
 
-// WithLogger injects a logger implementation.
-func WithLogger(logger glog.HLoggerBase) Option {
-	return func(n *Notifier) {
+// WithFeishuLogger 注入 logger。
+func WithFeishuLogger(logger glog.HLoggerBase) FeishuOption {
+	return func(n *FeishuNotifier) {
 		n.logger = logger
 	}
 }
 
-// Notifier sends alert events to Feishu webhook.
-type Notifier struct {
+// 编译期接口检查。
+var _ Notifier = (*FeishuNotifier)(nil)
+
+// FeishuNotifier 通过飞书 webhook 发送告警。
+type FeishuNotifier struct {
 	cfg    *config.FeishuConfig
 	logger glog.HLoggerBase
 	client *http.Client
 }
 
-func New(cfg *config.FeishuConfig, opts ...Option) *Notifier {
-	n := &Notifier{
+// NewFeishu 创建飞书通知器。
+func NewFeishu(cfg *config.FeishuConfig, opts ...FeishuOption) *FeishuNotifier {
+	n := &FeishuNotifier{
 		cfg:    cfg,
 		client: &http.Client{Timeout: 10 * time.Second},
 	}
@@ -51,15 +57,9 @@ func New(cfg *config.FeishuConfig, opts ...Option) *Notifier {
 	return n
 }
 
-// Send dispatches an alert event to the Feishu webhook as an interactive card.
-func (n *Notifier) Send(decision alerter.AlertDecision) error {
-	if decision.Action != "send" {
-		return nil
-	}
-	e := decision.Event
-
-	// Build interactive card message.
-	card := buildCard(e)
+// Send 发送告警事件到飞书。
+func (n *FeishuNotifier) Send(event model.AlertEvent) error {
+	card := buildCard(event)
 
 	payload := map[string]interface{}{
 		"msg_type": "interactive",
@@ -71,53 +71,28 @@ func (n *Notifier) Send(decision alerter.AlertDecision) error {
 		return fmt.Errorf("marshal: %w", err)
 	}
 
-	// Sign if secret is configured.
-	webhookURL := n.cfg.WebhookURL
-	if n.cfg.SignSecret != "" {
-		ts := time.Now().Unix()
-		sign, err := genSign(n.cfg.SignSecret, ts)
-		if err != nil {
-			return fmt.Errorf("sign: %w", err)
-		}
-		// Append timestamp and sign to URL.
-		sep := "?"
-		if strings.Contains(webhookURL, "?") {
-			sep = "&"
-		}
-		webhookURL = fmt.Sprintf("%s%stimestamp=%d&sign=%s", webhookURL, sep, ts, sign)
-	}
-
-	resp, err := n.client.Post(webhookURL, "application/json", bytes.NewReader(body))
+	webhookURL, err := n.signURL()
 	if err != nil {
-		return fmt.Errorf("post: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("feishu returned %d: %s", resp.StatusCode, string(respBody))
+		return err
 	}
 
-	// Check Feishu response code.
-	var result struct {
-		Code int    `json:"code"`
-		Msg  string `json:"msg"`
-	}
-	if err := json.Unmarshal(respBody, &result); err == nil && result.Code != 0 {
-		return fmt.Errorf("feishu error %d: %s", result.Code, result.Msg)
+	resp, err := n.post(webhookURL, body)
+	if err != nil {
+		return err
 	}
 
 	n.logger.Info("alert sent",
-		zap.Int64("job_id", e.JobID),
-		zap.String("job_name", e.JobName),
-		zap.String("database", e.Database),
+		zap.Int64("job_id", event.JobID),
+		zap.String("job_name", event.JobName),
+		zap.String("database", event.Database),
+		zap.String("response", resp),
 	)
 	return nil
 }
 
-// SendRecovery sends a recovery notification for a job that is no longer paused.
-func (n *Notifier) SendRecovery(jobKey string, database string, jobName string, duration time.Duration, sendCount int) error {
-	card := buildRecoveryCard(database, jobName, duration, sendCount)
+// SendRecovery 发送恢复通知到飞书。
+func (n *FeishuNotifier) SendRecovery(info model.RecoveryInfo) error {
+	card := buildRecoveryCard(info)
 
 	payload := map[string]interface{}{
 		"msg_type": "interactive",
@@ -129,29 +104,63 @@ func (n *Notifier) SendRecovery(jobKey string, database string, jobName string, 
 		return fmt.Errorf("marshal: %w", err)
 	}
 
-	webhookURL := n.cfg.WebhookURL
-	if n.cfg.SignSecret != "" {
-		ts := time.Now().Unix()
-		sign, err := genSign(n.cfg.SignSecret, ts)
-		if err != nil {
-			return fmt.Errorf("sign: %w", err)
-		}
-		sep := "?"
-		if strings.Contains(webhookURL, "?") {
-			sep = "&"
-		}
-		webhookURL = fmt.Sprintf("%s%stimestamp=%d&sign=%s", webhookURL, sep, ts, sign)
+	webhookURL, err := n.signURL()
+	if err != nil {
+		return err
 	}
 
-	resp, err := n.client.Post(webhookURL, "application/json", bytes.NewReader(body))
+	resp, err := n.post(webhookURL, body)
 	if err != nil {
-		return fmt.Errorf("post: %w", err)
+		return err
+	}
+
+	n.logger.Info("recovery notification sent",
+		zap.String("job_key", info.JobKey),
+		zap.String("database", info.Database),
+		zap.Duration("duration", info.Duration.Round(time.Second)),
+		zap.String("response", resp),
+	)
+	return nil
+}
+
+// signURL 生成带签名的 webhook URL。
+func (n *FeishuNotifier) signURL() (string, error) {
+	webhookURL := n.cfg.WebhookURL
+	if n.cfg.SignSecret == "" {
+		return webhookURL, nil
+	}
+	ts := time.Now().Unix()
+	sign, err := genSign(n.cfg.SignSecret, ts)
+	if err != nil {
+		return "", fmt.Errorf("sign: %w", err)
+	}
+	sep := "?"
+	if strings.Contains(webhookURL, "?") {
+		sep = "&"
+	}
+	return fmt.Sprintf("%s%stimestamp=%d&sign=%s", webhookURL, sep, ts, sign), nil
+}
+
+// post 发送 webhook 请求并校验响应。
+func (n *FeishuNotifier) post(url string, body []byte) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("new request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := n.client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("post: %w", err)
 	}
 	defer resp.Body.Close()
 
 	respBody, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("feishu returned %d: %s", resp.StatusCode, string(respBody))
+		return "", fmt.Errorf("feishu returned %d: %s", resp.StatusCode, string(respBody))
 	}
 
 	var result struct {
@@ -159,20 +168,14 @@ func (n *Notifier) SendRecovery(jobKey string, database string, jobName string, 
 		Msg  string `json:"msg"`
 	}
 	if err := json.Unmarshal(respBody, &result); err == nil && result.Code != 0 {
-		return fmt.Errorf("feishu error %d: %s", result.Code, result.Msg)
+		return "", fmt.Errorf("feishu error %d: %s", result.Code, result.Msg)
 	}
 
-	n.logger.Info("recovery notification sent",
-		zap.String("job_key", jobKey),
-		zap.String("database", database),
-		zap.Duration("duration", duration.Round(time.Second)),
-		zap.Int("send_count", sendCount),
-	)
-	return nil
+	return string(respBody), nil
 }
 
+// buildCard 构建告警卡片。
 func buildCard(e model.AlertEvent) map[string]interface{} {
-	// Status color.
 	color := "red"
 	switch strings.ToUpper(e.State) {
 	case "PAUSED":
@@ -181,7 +184,6 @@ func buildCard(e model.AlertEvent) map[string]interface{} {
 		color = "yellow"
 	}
 
-	// Header.
 	header := map[string]interface{}{
 		"template": color,
 		"title": map[string]interface{}{
@@ -190,7 +192,6 @@ func buildCard(e model.AlertEvent) map[string]interface{} {
 		},
 	}
 
-	// Fields.
 	fields := []map[string]interface{}{
 		field("Job ID", fmt.Sprintf("%d", e.JobID)),
 		field("Job Name", e.JobName),
@@ -206,7 +207,6 @@ func buildCard(e model.AlertEvent) map[string]interface{} {
 		fields = append(fields, field("累计告警次数", fmt.Sprintf("%d 次", e.TotalSendCount)))
 	}
 
-	// Reason element.
 	elements := []map[string]interface{}{
 		{
 			"tag":    "div",
@@ -224,7 +224,6 @@ func buildCard(e model.AlertEvent) map[string]interface{} {
 		},
 	}
 
-	// Error detail (if available).
 	if e.ErrorDetail != "" {
 		elements = append(elements, map[string]interface{}{
 			"tag": "div",
@@ -251,6 +250,49 @@ func buildCard(e model.AlertEvent) map[string]interface{} {
 	}
 }
 
+// buildRecoveryCard 构建恢复卡片。
+func buildRecoveryCard(info model.RecoveryInfo) map[string]interface{} {
+	header := map[string]interface{}{
+		"template": "green",
+		"title": map[string]interface{}{
+			"tag":     "plain_text",
+			"content": fmt.Sprintf("✅ Doris Routine Load 恢复 [%s]", info.Database),
+		},
+	}
+
+	recoveredAt := "-"
+	if !info.RecoveredAt.IsZero() {
+		recoveredAt = info.RecoveredAt.Format("2006-01-02 15:04:05")
+	}
+
+	fields := []map[string]interface{}{
+		field("Database", info.Database),
+		field("Job Name", valueOrDash(info.JobName)),
+		field("恢复时间", recoveredAt),
+	}
+	if info.Duration > 0 {
+		fields = append(fields, field("告警持续时间", formatDuration(info.Duration)))
+	}
+	if info.SendCount > 0 {
+		fields = append(fields, field("累计告警次数", fmt.Sprintf("%d 次", info.SendCount)))
+	}
+
+	elements := []map[string]interface{}{
+		{"tag": "div", "fields": fields},
+		{
+			"tag": "note",
+			"elements": []map[string]interface{}{
+				{"tag": "plain_text", "content": "Doris Routine Load Alert System"},
+			},
+		},
+	}
+
+	return map[string]interface{}{
+		"header":   header,
+		"elements": elements,
+	}
+}
+
 func field(label, value string) map[string]interface{} {
 	return map[string]interface{}{
 		"is_short": true,
@@ -268,53 +310,12 @@ func valueOrDash(s string) string {
 	return s
 }
 
-// genSign generates Feishu webhook signature.
-// Feishu signature: HMAC-SHA256(key=empty, message=timestamp+"\n"+secret)
+// genSign 生成飞书 webhook 签名。
+// 签名算法: HMAC-SHA256(key=strToSign, msg="")，其中 strToSign = timestamp + "\n" + secret
 func genSign(secret string, timestamp int64) (string, error) {
 	strToSign := fmt.Sprintf("%d\n%s", timestamp, secret)
-	h := hmac.New(sha256.New, []byte(""))
-	_, err := h.Write([]byte(strToSign))
-	if err != nil {
-		return "", err
-	}
+	h := hmac.New(sha256.New, []byte(strToSign))
 	return base64.StdEncoding.EncodeToString(h.Sum(nil)), nil
-}
-
-func buildRecoveryCard(database, jobName string, duration time.Duration, sendCount int) map[string]interface{} {
-	header := map[string]interface{}{
-		"template": "green",
-		"title": map[string]interface{}{
-			"tag":     "plain_text",
-			"content": fmt.Sprintf("✅ Doris Routine Load 恢复 [%s]", database),
-		},
-	}
-
-	fields := []map[string]interface{}{
-		field("Database", database),
-		field("Job Name", valueOrDash(jobName)),
-		field("恢复时间", time.Now().Format("2006-01-02 15:04:05")),
-	}
-	if duration > 0 {
-		fields = append(fields, field("告警持续时间", formatDuration(duration)))
-	}
-	if sendCount > 0 {
-		fields = append(fields, field("累计告警次数", fmt.Sprintf("%d 次", sendCount)))
-	}
-
-	elements := []map[string]interface{}{
-		{"tag": "div", "fields": fields},
-		{
-			"tag": "note",
-			"elements": []map[string]interface{}{
-				{"tag": "plain_text", "content": "Doris Routine Load Alert System"},
-			},
-		},
-	}
-
-	return map[string]interface{}{
-		"header":   header,
-		"elements": elements,
-	}
 }
 
 func formatDuration(d time.Duration) string {

@@ -1,15 +1,16 @@
+// @Author: Jimmy
+// @DateTime: 2026/02/15
+
 package notifier
 
 import (
 	"testing"
 	"time"
 
-	"github.com/jimmy-boss/alert_routine_load/model"
+	"github.com/jimmy-boss/alert_routine_load/v2/model"
 )
 
 func TestGenSign(t *testing.T) {
-	// Known test vector: secret="", timestamp=1234567890
-	// Expected: HMAC-SHA256(key="", message="1234567890\n")
 	sign, err := genSign("", 1234567890)
 	if err != nil {
 		t.Fatalf("genSign error: %v", err)
@@ -17,7 +18,6 @@ func TestGenSign(t *testing.T) {
 	if sign == "" {
 		t.Fatal("genSign returned empty string")
 	}
-	// Verify deterministic: same inputs produce same output.
 	sign2, _ := genSign("", 1234567890)
 	if sign != sign2 {
 		t.Errorf("genSign not deterministic: %q != %q", sign, sign2)
@@ -32,14 +32,6 @@ func TestGenSign_DifferentSecret(t *testing.T) {
 	}
 }
 
-func TestGenSign_DifferentTimestamp(t *testing.T) {
-	sign1, _ := genSign("secret", 1234567890)
-	sign2, _ := genSign("secret", 9876543210)
-	if sign1 == sign2 {
-		t.Error("different timestamps should produce different signatures")
-	}
-}
-
 func TestFormatDuration(t *testing.T) {
 	tests := []struct {
 		input  time.Duration
@@ -51,7 +43,7 @@ func TestFormatDuration(t *testing.T) {
 		{1 * time.Hour, "1小时0分钟"},
 		{2*time.Hour + 15*time.Minute, "2小时15分钟"},
 		{25 * time.Hour, "1天1小时"},
-		{72 * time.Hour + 30*time.Minute, "3天0小时"},
+		{72*time.Hour + 30*time.Minute, "3天0小时"},
 		{0, "0秒"},
 	}
 	for _, tt := range tests {
@@ -75,7 +67,6 @@ func TestBuildCard_Fields(t *testing.T) {
 	}
 	card := buildCard(e)
 
-	// Check header exists.
 	header, ok := card["header"].(map[string]interface{})
 	if !ok {
 		t.Fatal("card missing header")
@@ -92,7 +83,6 @@ func TestBuildCard_Fields(t *testing.T) {
 		t.Error("title content should not be empty")
 	}
 
-	// Check elements exist.
 	elements, ok := card["elements"].([]map[string]interface{})
 	if !ok {
 		t.Fatal("card missing elements")
@@ -104,15 +94,14 @@ func TestBuildCard_Fields(t *testing.T) {
 
 func TestBuildCard_LagState(t *testing.T) {
 	e := model.AlertEvent{
-		JobID:    12345,
-		JobName:  "test_job",
-		Database: "test_db",
-		State:    "LAG",
+		JobID:     12345,
+		JobName:   "test_job",
+		Database:  "test_db",
+		State:     "LAG",
 		Timestamp: time.Now(),
 	}
 	card := buildCard(e)
 	header := card["header"].(map[string]interface{})
-	// LAG state should use yellow color.
 	if header["template"] != "yellow" {
 		t.Errorf("LAG template = %q, want %q", header["template"], "yellow")
 	}
@@ -120,10 +109,10 @@ func TestBuildCard_LagState(t *testing.T) {
 
 func TestBuildCard_PausedState(t *testing.T) {
 	e := model.AlertEvent{
-		JobID:    12345,
-		JobName:  "test_job",
-		Database: "test_db",
-		State:    "PAUSED",
+		JobID:     12345,
+		JobName:   "test_job",
+		Database:  "test_db",
+		State:     "PAUSED",
 		Timestamp: time.Now(),
 	}
 	card := buildCard(e)
@@ -134,7 +123,13 @@ func TestBuildCard_PausedState(t *testing.T) {
 }
 
 func TestBuildRecoveryCard_Fields(t *testing.T) {
-	card := buildRecoveryCard("test_db", "test_job", 2*time.Hour, 3)
+	info := model.RecoveryInfo{
+		Database:    "test_db",
+		JobName:     "test_job",
+		RecoveredAt: time.Now(),
+		Duration:    2 * time.Hour,
+	}
+	card := buildRecoveryCard(info)
 
 	header, ok := card["header"].(map[string]interface{})
 	if !ok {

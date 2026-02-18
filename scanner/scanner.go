@@ -1,4 +1,4 @@
-// Package scanner queries Doris for routine load job status.
+// Package scanner 查询 Doris routine load 任务状态。
 package scanner
 
 import (
@@ -8,31 +8,30 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jimmy-boss/alert_routine_load/model"
+	"github.com/jimmy-boss/alert_routine_load/v2/model"
 	"github.com/jimmy-boss/go-log/glog"
 	"go.uber.org/zap"
 	"gorm.io/gorm"
 )
 
-// Option is a functional option for Scanner.
+// Option 是 Scanner 的函数选项。
 type Option func(*Scanner)
 
-// WithLogger injects a logger implementation.
+// WithLogger 注入 logger 实现。
 func WithLogger(logger glog.HLoggerBase) Option {
 	return func(s *Scanner) {
 		s.logger = logger
 	}
 }
 
-// Scanner queries Doris routine load jobs.
+// Scanner 查询 Doris routine load 任务。
 type Scanner struct {
 	db     *gorm.DB
 	logger glog.HLoggerBase
 }
 
-// New creates a Scanner with an existing *gorm.DB connection.
-// Third-party callers can pass their own *gorm.DB directly,
-// no need to configure doris connection in YAML.
+// New 创建 Scanner，接收已有 *gorm.DB 连接。
+// 第三方调用方可直接传入 *gorm.DB，无需在 YAML 中配置 doris 连接。
 func New(db *gorm.DB, opts ...Option) *Scanner {
 	s := &Scanner{db: db}
 	for _, opt := range opts {
@@ -44,7 +43,7 @@ func New(db *gorm.DB, opts ...Option) *Scanner {
 	return s
 }
 
-// ShowDatabases executes SHOW DATABASES and returns the list of database names.
+// ShowDatabases 执行 SHOW DATABASES 并返回数据库名列表。
 func (s *Scanner) ShowDatabases(ctx context.Context) ([]string, error) {
 	rows, err := s.db.WithContext(ctx).Raw("SHOW DATABASES").Rows()
 	if err != nil {
@@ -64,16 +63,16 @@ func (s *Scanner) ShowDatabases(ctx context.Context) ([]string, error) {
 	return dbs, rows.Err()
 }
 
-// JobRef is a reference to a routine load job (database + name).
+// JobRef 是 routine load 任务的引用（数据库名 + 任务名）。
 type JobRef struct {
 	DBName  string
 	JobName string
 }
 
-// QueryJobList discovers routine load jobs via information_schema.
-// If databases is non-empty, only those databases are queried.
-// If jobFilter is non-empty, only those job names are included.
-// Returns a list of JobRef (database + job name pairs).
+// QueryJobList 通过 information_schema 发现 routine load 任务。
+// 如果 databases 非空，仅查询指定数据库。
+// 如果 jobFilter 非空，仅包含指定任务名。
+// 返回 JobRef 列表（数据库名 + 任务名）。
 func (s *Scanner) QueryJobList(ctx context.Context, databases []string, jobFilter map[string][]string) ([]JobRef, error) {
 	query := "SELECT DB_NAME, JOB_NAME FROM information_schema.routine_load_jobs"
 	var args []interface{}
@@ -93,33 +92,40 @@ func (s *Scanner) QueryJobList(ctx context.Context, databases []string, jobFilte
 	}
 	defer rows.Close()
 
-	// Build job name filter set per database.
 	var refs []JobRef
+
+	// 预构建 nameSet，避免循环内重复创建。
+	filterSets := make(map[string]map[string]bool, len(jobFilter))
+	for db, names := range jobFilter {
+		if len(names) > 0 {
+			set := make(map[string]bool, len(names))
+			for _, n := range names {
+				set[n] = true
+			}
+			filterSets[db] = set
+		}
+	}
+
 	for rows.Next() {
 		var dbName, jobName string
 		if err := rows.Scan(&dbName, &jobName); err != nil {
 			s.logger.Warn("scan job list row failed", zap.Error(err))
 			continue
 		}
-		// Apply job name filter if configured.
-		if names, ok := jobFilter[dbName]; ok && len(names) > 0 {
-			nameSet := make(map[string]bool, len(names))
-			for _, n := range names {
-				nameSet[n] = true
-			}
-			if !nameSet[jobName] {
-				continue
-			}
+		if set, ok := filterSets[dbName]; ok && !set[jobName] {
+			continue
 		}
 		refs = append(refs, JobRef{DBName: dbName, JobName: jobName})
 	}
 	return refs, rows.Err()
 }
 
-// QueryJobDetail retrieves full details for a single routine load job.
-// Uses SHOW ROUTINE LOAD FOR `db`.`job` — no USE database needed.
+// QueryJobDetail 获取单个 routine load 任务的完整详情。
+// 使用 SHOW ROUTINE LOAD FOR `db`.`job`，无需 USE database。
 func (s *Scanner) QueryJobDetail(ctx context.Context, dbName, jobName string) (*model.RoutineLoadJob, error) {
-	query := fmt.Sprintf("SHOW ROUTINE LOAD FOR `%s`.`%s`", dbName, jobName)
+	query := fmt.Sprintf("SHOW ROUTINE LOAD FOR `%s`.`%s`",
+		strings.ReplaceAll(dbName, "`", "``"),
+		strings.ReplaceAll(jobName, "`", "``"))
 	rows, err := s.db.WithContext(ctx).Raw(query).Rows()
 	if err != nil {
 		return nil, fmt.Errorf("show routine load for %s.%s: %w", dbName, jobName, err)
@@ -152,22 +158,22 @@ func (s *Scanner) QueryJobDetail(ctx context.Context, dbName, jobName string) (*
 	}
 
 	job := parseJob(colMap)
-	job.Name = jobName // ensure name is set from the query parameter
+	job.Name = jobName // 确保从查询参数设置 name
 	return &job, nil
 }
 
-// QueryAllDatabases queries routine load for every database in the config.
-// Returns a map of database → jobs.
-// Uses information_schema to discover jobs, then SHOW ROUTINE LOAD FOR for details.
-// No USE database statement — safe for concurrent use.
+// QueryAllDatabases 查询配置中每个数据库的 routine load 任务。
+// 返回 数据库→任务列表 的映射。
+// 使用 information_schema 发现任务，再用 SHOW ROUTINE LOAD FOR 获取详情。
+// 无 USE database 语句，安全支持并发使用。
 func (s *Scanner) QueryAllDatabases(ctx context.Context, databases []string, jobFilter map[string][]string) (map[string][]model.RoutineLoadJob, error) {
-	// Step 1: Discover jobs via information_schema.
+	// 第一步：通过 information_schema 发现任务。
 	refs, err := s.QueryJobList(ctx, databases, jobFilter)
 	if err != nil {
 		return nil, fmt.Errorf("query job list: %w", err)
 	}
 
-	// Step 2: Get details for each job.
+	// 第二步：获取每个任务的详情。
 	result := make(map[string][]model.RoutineLoadJob)
 	for _, ref := range refs {
 		job, err := s.QueryJobDetail(ctx, ref.DBName, ref.JobName)
@@ -184,9 +190,8 @@ func (s *Scanner) QueryAllDatabases(ctx context.Context, databases []string, job
 	return result, nil
 }
 
-// parseJob maps a column→value map to a RoutineLoadJob struct.
-// Column names from SHOW ROUTINE LOAD vary across Doris versions;
-// we match by common names.
+// parseJob 将列名→值映射转换为 RoutineLoadJob 结构体。
+// SHOW ROUTINE LOAD 返回的列名因 Doris 版本而异，使用通用名称匹配。
 func parseJob(m map[string]string) model.RoutineLoadJob {
 	j := model.RoutineLoadJob{
 		Name:                 pick(m, "Name", "name"),

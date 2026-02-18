@@ -1,0 +1,71 @@
+# alert_routine_load_v2 配置示例
+# 复制此文件为 alert.yaml 并填入实际值
+
+# Doris FE 连接信息
+doris:
+  host: "127.0.0.1"
+  port: 9030
+  user: "root"
+  password: ""
+
+# 通知渠道配置
+notify:
+  channel: feishu  # feishu | dingtalk
+  feishu:
+    webhook_url: "https://open.feishu.cn/open-apis/bot/v2/hook/your-webhook-id"
+    sign_secret: ""  # 可选，签名校验密钥
+  dingtalk:
+    webhook_url: "https://oapi.dingtalk.com/robot/send?access_token=your-token"
+    # secret: ""     # 可选，加签密钥
+
+# 告警策略
+alert:
+  lag:
+    # 全局默认阈值，partition lag 超过此值触发告警（0 = 不检查 lag）
+    threshold: 10000
+    # 恢复阈值，lag 降到此值以下才判定恢复（应 < threshold）
+    recovery: 5000
+    # 恢复稳定窗口，连续满足恢复条件时长后才真正恢复（防抖）
+    # 适用于 lag 和 paused 两种告警
+    stability_window: "2m"
+    # 告警发送间隔（退避初始值）
+    alert_interval: "5m"
+    # 退避系数，每次告警后间隔乘以此值（1.0 = 固定间隔）
+    # 示例：factor=1.2 时，第1次5m → 第2次6m → 第3次7.2m → ...
+    backoff_factor: 1.2
+    # 最大告警间隔（退避上限）
+    max_interval: "1h"
+    # 单个告警周期最大发送次数
+    max_send_count: 10
+  history:
+    # 归档记录保留天数
+    retention_days: 7
+
+# 扫描数据库配置
+scan_databases:
+  # 精确排除的数据库列表（系统库默认排除）
+  exclude:
+    - "information_schema"
+    - "mysql"
+    - "_statistics_"
+    - "doris_audit_db__"
+    - "__internal_schema"
+  # 正则排除（匹配数据库名的正则表达式）
+  exclude_patterns:
+    - "^tmp_.*"       # 排除 tmp_ 开头的库
+    - ".*_bak$"       # 排除 _bak 结尾的库
+
+# 数据库级规则（可选，支持三层覆盖：全局 → database → job）
+database:
+  - name: "your_database"
+    alert:                    # database 级覆盖（对该库所有 job 生效）
+      lag:
+        threshold: 8000
+    jobs:
+      - name: "your_job_name"
+        alert:                # job 级覆盖（优先级最高）
+          lag:
+            threshold: 5000
+            recovery: 2000
+  - name: "another_database"
+    # 不指定 alert/jobs 则对该数据库下所有 job 生效全局默认配置
