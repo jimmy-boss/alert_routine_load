@@ -108,20 +108,7 @@ func (s *StatusStore) Update(key string, fn func(st *model.AlertStatus)) bool {
 	return true
 }
 
-// GetOrCreate 原子获取或创建 status。key 不存在时用 factory 创建并存入。
-// 返回 status 副本和是否为新建。
-func (s *StatusStore) GetOrCreate(key string, factory func() *model.AlertStatus) (*model.AlertStatus, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	st, ok := s.items[key]
-	if !ok {
-		st = factory()
-		s.items[key] = st
-		s.dirty = true
-	}
-	cp := *st
-	return &cp, !ok
-}
+
 
 // Len 返回当前存储的条目数。
 func (s *StatusStore) Len() int {

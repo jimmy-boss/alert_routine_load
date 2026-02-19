@@ -167,22 +167,10 @@ func (e *Evaluator) Evaluate(ctx context.Context, dbJobs map[string][]model.Rout
 // 关键：仅在确认需要告警时才创建 status。
 func (e *Evaluator) evaluateOne(ctx context.Context, key, dbName string, job model.RoutineLoadJob) Decision {
 	lag := e.cfg.GetEffective(dbName, job.Name)
+	st := e.store.Get(key)
 
-	// GetOrCreate 原子获取或创建，避免 TOCTOU 竞态
-	now := time.Now()
-	st, isNew := e.store.GetOrCreate(key, func() *model.AlertStatus {
-		return &model.AlertStatus{
-			JobKey:       key,
-			JobName:      job.Name,
-			Database:     dbName,
-			State:        model.StateAlerting,
-			AlertActive:  true,
-			FirstAlertAt: now,
-		}
-	})
-
-	// MaxSendCount 检查（最先执行，避免后续计算浪费）
-	if !isNew && st.SendCount >= e.cfg.Alert.Lag.MaxSendCount {
+	// MaxSendCount 检查
+	if st != nil && st.SendCount >= e.cfg.Alert.Lag.MaxSendCount {
 		return Decision{
 			Action: "skip",
 			Reason: fmt.Sprintf("max send count reached (%d)", e.cfg.Alert.Lag.MaxSendCount),
@@ -190,7 +178,7 @@ func (e *Evaluator) evaluateOne(ctx context.Context, key, dbName string, job mod
 	}
 
 	// 指数退避检查：delay = base * factor^(sendCount-1)，上限为 maxInterval
-	if !isNew && !st.LastSentAt.IsZero() {
+	if st != nil && !st.LastSentAt.IsZero() {
 		delay := computeDelay(
 			st.SendCount,
 			e.cfg.Alert.Lag.AlertInterval.Duration,
@@ -216,6 +204,21 @@ func (e *Evaluator) evaluateOne(ctx context.Context, key, dbName string, job mod
 		}
 	}
 
+	// 确认需要告警，此时才创建 status
+	now := time.Now()
+	if st == nil {
+		st = &model.AlertStatus{
+			JobKey:       key,
+			JobName:      job.Name,
+			Database:     dbName,
+			Source:       source,
+			State:        model.StateAlerting,
+			AlertActive:  true,
+			FirstAlertAt: now,
+		}
+		e.store.Set(key, st)
+	}
+
 	var errorDetail string
 	if job.ErrorLogURLs != "" {
 		errorDetail = e.fetchAndDedup(ctx, job.ErrorLogURLs)
@@ -228,13 +231,6 @@ func (e *Evaluator) evaluateOne(ctx context.Context, key, dbName string, job mod
 		} else {
 			errorDetail = lagSummary
 		}
-	}
-
-	if isNew {
-		// 新建的 status 补充 source
-		e.store.Update(key, func(s *model.AlertStatus) {
-			s.Source = source
-		})
 	}
 
 	event := model.AlertEvent{
