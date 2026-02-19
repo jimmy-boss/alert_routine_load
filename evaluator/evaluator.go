@@ -166,11 +166,29 @@ func (e *Evaluator) Evaluate(ctx context.Context, dbJobs map[string][]model.Rout
 // evaluateOne 评估单个 job：退避检查、lag 检查、创建/更新 status。
 // 关键：仅在确认需要告警时才创建 status。
 func (e *Evaluator) evaluateOne(ctx context.Context, key, dbName string, job model.RoutineLoadJob) Decision {
-	st := e.store.Get(key)
 	lag := e.cfg.GetEffective(dbName, job.Name)
 
+	// GetOrCreate 原子获取或创建，避免 TOCTOU 竞态
+	st, isNew := e.store.GetOrCreate(key, func() *model.AlertStatus {
+		return &model.AlertStatus{
+			JobKey:      key,
+			JobName:     job.Name,
+			Database:    dbName,
+			State:       model.StateAlerting,
+			AlertActive: true,
+		}
+	})
+
+	// MaxSendCount 检查（最先执行，避免后续计算浪费）
+	if !isNew && st.SendCount >= e.cfg.Alert.Lag.MaxSendCount {
+		return Decision{
+			Action: "skip",
+			Reason: fmt.Sprintf("max send count reached (%d)", e.cfg.Alert.Lag.MaxSendCount),
+		}
+	}
+
 	// 指数退避检查：delay = base * factor^(sendCount-1)，上限为 maxInterval
-	if st != nil && !st.LastSentAt.IsZero() {
+	if !isNew && !st.LastSentAt.IsZero() {
 		delay := computeDelay(
 			st.SendCount,
 			e.cfg.Alert.Lag.AlertInterval.Duration,
@@ -196,13 +214,6 @@ func (e *Evaluator) evaluateOne(ctx context.Context, key, dbName string, job mod
 		}
 	}
 
-	if st != nil && st.SendCount >= e.cfg.Alert.Lag.MaxSendCount {
-		return Decision{
-			Action: "skip",
-			Reason: fmt.Sprintf("max send count reached (%d)", e.cfg.Alert.Lag.MaxSendCount),
-		}
-	}
-
 	var errorDetail string
 	if job.ErrorLogURLs != "" {
 		errorDetail = e.fetchAndDedup(ctx, job.ErrorLogURLs)
@@ -218,17 +229,12 @@ func (e *Evaluator) evaluateOne(ctx context.Context, key, dbName string, job mod
 	}
 
 	now := time.Now()
-	if st == nil {
-		st = &model.AlertStatus{
-			JobKey:       key,
-			JobName:      job.Name,
-			Database:     dbName,
-			Source:       source,
-			State:        model.StateAlerting,
-			AlertActive:  true,
-			FirstAlertAt: now,
-		}
-		e.store.Set(key, st)
+	if isNew {
+		// 新建的 status 补充 source 和 FirstAlertAt
+		e.store.Update(key, func(s *model.AlertStatus) {
+			s.Source = source
+			s.FirstAlertAt = now
+		})
 	}
 
 	event := model.AlertEvent{

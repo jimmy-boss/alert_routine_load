@@ -167,13 +167,9 @@ func (n *DingtalkNotifier) sendMarkdown(title, text string) error {
 }
 
 // dingtalkSign 生成钉钉加签。
-// 签名算法: HMAC-SHA256(key=secret, message=timestamp)
+// 签名算法: HMAC-SHA256(key=strToSign, message=""), strToSign = timestamp + "\n" + secret
 func dingtalkSign(secret string, timestamp int64) (string, error) {
 	strToSign := fmt.Sprintf("%d\n%s", timestamp, secret)
-	mac := hmac.New(sha256.New, []byte(secret))
-	_, err := mac.Write([]byte(strToSign))
-	if err != nil {
-		return "", err
-	}
-	return url.QueryEscape(base64.StdEncoding.EncodeToString(mac.Sum(nil))), nil
+	h := hmac.New(sha256.New, []byte(strToSign))
+	return url.QueryEscape(base64.StdEncoding.EncodeToString(h.Sum(nil))), nil
 }

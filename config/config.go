@@ -43,11 +43,12 @@ var DefaultSystemDBs = []string{
 
 // Config 是顶层配置结构体。
 type Config struct {
-	Doris         DorisConfig         `yaml:"doris"`
-	Notify        NotifyConfig        `yaml:"notify"`
-	Alert         AlertConfig         `yaml:"alert"`
-	ScanDatabases ScanDatabasesConfig `yaml:"scan_databases"`
-	Database      []DatabaseRule      `yaml:"database"`
+	Doris            DorisConfig         `yaml:"doris"`
+	Notify           NotifyConfig        `yaml:"notify"`
+	Alert            AlertConfig         `yaml:"alert"`
+	ScanDatabases    ScanDatabasesConfig `yaml:"scan_databases"`
+	Database         []DatabaseRule      `yaml:"database"`
+	compiledPatterns []*regexp.Regexp    `yaml:"-"` // 预编译的正则，不参与 YAML 序列化
 }
 
 // DorisConfig Doris 连接配置。
@@ -193,6 +194,14 @@ func finalize(cfg *Config) (*Config, error) {
 	if err := validate(cfg); err != nil {
 		return nil, fmt.Errorf("配置校验失败: %w", err)
 	}
+	// 预编译正则表达式
+	for _, p := range cfg.ScanDatabases.ExcludePatterns {
+		re, err := regexp.Compile(p)
+		if err != nil {
+			continue // validate 已校验过，这里跳过无效的
+		}
+		cfg.compiledPatterns = append(cfg.compiledPatterns, re)
+	}
 	return cfg, nil
 }
 
@@ -262,13 +271,16 @@ func (c *Config) FilterDatabases(databases []string) []string {
 		exclude[db] = struct{}{}
 	}
 
-	var patterns []*regexp.Regexp
-	for _, p := range c.ScanDatabases.ExcludePatterns {
-		re, err := regexp.Compile(p)
-		if err != nil {
-			continue
+	// 使用预编译的正则，如果未初始化则回退到实时编译
+	patterns := c.compiledPatterns
+	if patterns == nil && len(c.ScanDatabases.ExcludePatterns) > 0 {
+		for _, p := range c.ScanDatabases.ExcludePatterns {
+			re, err := regexp.Compile(p)
+			if err != nil {
+				continue
+			}
+			patterns = append(patterns, re)
 		}
-		patterns = append(patterns, re)
 	}
 
 	var result []string
