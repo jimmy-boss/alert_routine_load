@@ -169,13 +169,15 @@ func (e *Evaluator) evaluateOne(ctx context.Context, key, dbName string, job mod
 	lag := e.cfg.GetEffective(dbName, job.Name)
 
 	// GetOrCreate 原子获取或创建，避免 TOCTOU 竞态
+	now := time.Now()
 	st, isNew := e.store.GetOrCreate(key, func() *model.AlertStatus {
 		return &model.AlertStatus{
-			JobKey:      key,
-			JobName:     job.Name,
-			Database:    dbName,
-			State:       model.StateAlerting,
-			AlertActive: true,
+			JobKey:       key,
+			JobName:      job.Name,
+			Database:     dbName,
+			State:        model.StateAlerting,
+			AlertActive:  true,
+			FirstAlertAt: now,
 		}
 	})
 
@@ -228,12 +230,10 @@ func (e *Evaluator) evaluateOne(ctx context.Context, key, dbName string, job mod
 		}
 	}
 
-	now := time.Now()
 	if isNew {
-		// 新建的 status 补充 source 和 FirstAlertAt
+		// 新建的 status 补充 source
 		e.store.Update(key, func(s *model.AlertStatus) {
 			s.Source = source
-			s.FirstAlertAt = now
 		})
 	}
 
